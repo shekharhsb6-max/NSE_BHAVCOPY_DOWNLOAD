@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       bhavcopy_date:
-        description: "Bhavcopy date (YYYY-MM-DD), e.g. 2026-09-18"
+        description: "Bhavcopy date (2026-09-18), e.g. 2026-09-18"
         required: false
         default: ""
 
