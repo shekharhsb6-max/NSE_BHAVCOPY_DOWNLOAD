@@ -2,15 +2,20 @@ name: Daily NSE Bhavcopy → Google Sheet
 
 on:
   schedule:
-    # 13:30 UTC = 19:00 IST, Mon-Fri. NSE's bhavcopy is usually available
-    # by ~18:30-19:00 IST; if you see "not live yet" in the logs, push this
-    # later (e.g. "0 14 * * 1-5" for 19:30 IST).
+    # 13:30 UTC = 19:00 IST, Monday-Friday
     - cron: "30 13 * * 1-5"
-  workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
+
+  workflow_dispatch:
+    inputs:
+      bhavcopy_date:
+        description: "Optional date to fetch (YYYY-MM-DD). Leave blank for today."
+        required: false
+        default: ""
 
 jobs:
   fetch:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -27,4 +32,5 @@ jobs:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: RAW_DATA
           BHAVCOPY_MODE: append
+          BHAVCOPY_DATE: ${{ inputs.bhavcopy_date }}
         run: python fetch_bhavcopy.py
