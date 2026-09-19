@@ -2,13 +2,12 @@ name: Daily NSE Bhavcopy → Google Sheet
 
 on:
   schedule:
-    # 13:30 UTC = 19:00 IST, Monday-Friday
     - cron: "30 13 * * 1-5"
 
   workflow_dispatch:
     inputs:
       bhavcopy_date:
-        description: "Optional date to fetch (YYYY-MM-DD). Leave blank for today."
+        description: "Bhavcopy date (YYYY-MM-DD), e.g. 2026-09-18"
         required: false
         default: ""
 
@@ -31,6 +30,6 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           SHEET_NAME: RAW_DATA
-          BHAVCOPY_MODE: append
+          BHAVCOPY_MODE: overwrite
           BHAVCOPY_DATE: ${{ inputs.bhavcopy_date }}
         run: python fetch_bhavcopy.py
