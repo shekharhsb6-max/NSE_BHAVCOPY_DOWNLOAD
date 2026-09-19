@@ -1,0 +1,30 @@
+name: Daily NSE Bhavcopy → Google Sheet
+
+on:
+  schedule:
+    # 13:30 UTC = 19:00 IST, Mon-Fri. NSE's bhavcopy is usually available
+    # by ~18:30-19:00 IST; if you see "not live yet" in the logs, push this
+    # later (e.g. "0 14 * * 1-5" for 19:30 IST).
+    - cron: "30 13 * * 1-5"
+  workflow_dispatch: {}   # lets you trigger a manual run from the Actions tab
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run fetch script
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          SHEET_NAME: RAW_DATA
+          BHAVCOPY_MODE: append
+        run: python fetch_bhavcopy.py
