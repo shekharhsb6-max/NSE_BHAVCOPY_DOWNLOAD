@@ -386,7 +386,11 @@ def clean_bhavcopy(
     # A:M
     # ------------------------------------------------------------------------
 
-    out["TRADE_DATE"] = trade_date.isoformat()
+    # Write TRADE_DATE explicitly as a plain Python string for every row.
+    # This prevents pandas/numpy NaN or datetime objects from reaching
+    # the Google Sheets JSON request.
+    trade_date_text = str(trade_date)
+    out["TRADE_DATE"] = [trade_date_text] * len(df)
 
     out["SYMBOL"] = df[symbol_col]
     out["SERIES"] = df[series_col]
@@ -488,8 +492,31 @@ def clean_bhavcopy(
     # Exact A:O order.
     out = out[RAW_HEADERS]
 
-    # Replace pandas NaN with None.
-    out = out.where(pd.notnull(out), None)
+    # Convert every cell to a JSON-safe plain Python value.
+    # Google Sheets rejects NaN / NaT because JSON does not allow them.
+    def json_safe(value):
+        if value is None:
+            return None
+
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+
+        # Convert numpy scalar values to native Python values.
+        if hasattr(value, "item"):
+            try:
+                return value.item()
+            except (ValueError, TypeError):
+                pass
+
+        return value
+
+    out = out.applymap(json_safe)
+
+    # Final safety check: TRADE_DATE must never be blank/NaN.
+    out["TRADE_DATE"] = trade_date_text
 
     print(f"Cleaned {len(out)} rows.")
 
@@ -610,8 +637,8 @@ def ensure_header(worksheet) -> None:
         )
 
         worksheet.update(
-            "A1:O1",
-            [RAW_HEADERS],
+            range_name="A1:O1",
+            values=[RAW_HEADERS],
             value_input_option="USER_ENTERED",
         )
 
@@ -628,8 +655,8 @@ def ensure_header(worksheet) -> None:
         )
 
         worksheet.update(
-            "A1:O1",
-            [RAW_HEADERS],
+            range_name="A1:O1",
+            values=[RAW_HEADERS],
             value_input_option="USER_ENTERED",
         )
 
@@ -713,7 +740,30 @@ def write_date_batch(
 
             matching_rows.append(row_number)
 
-    rows = df.astype(object).values.tolist()
+    # Convert the dataframe to ordinary Python lists and make absolutely
+    # sure no NaN/NaT survives into the Google Sheets JSON payload.
+    rows = [
+        [None if (value is None or (isinstance(value, float) and pd.isna(value)))
+         else (value.item() if hasattr(value, "item") else value)
+         for value in row]
+        for row in df.astype(object).values.tolist()
+    ]
+
+    # Hard validation before making the API request.
+    for row_index, row in enumerate(rows, start=1):
+        for col_index, value in enumerate(row, start=1):
+            try:
+                if pd.isna(value):
+                    raise RuntimeError(
+                        f"Unsafe NaN/NaT value remains at "
+                        f"row {row_index}, column {col_index}."
+                    )
+            except (TypeError, ValueError):
+                pass
+
+    print(
+        f"Prepared {len(rows)} JSON-safe rows for Google Sheets."
+    )
 
     # ------------------------------------------------------------------------
     # Case 1: date already exists.
@@ -771,8 +821,8 @@ def write_date_batch(
 
         # One range write for the entire date.
         worksheet.update(
-            f"A{first_row}:O{first_row + len(rows) - 1}",
-            rows,
+            range_name=f"A{first_row}:O{first_row + len(rows) - 1}",
+            values=rows,
             value_input_option="USER_ENTERED",
         )
 
@@ -798,8 +848,8 @@ def write_date_batch(
     )
 
     worksheet.update(
-        f"A{next_row}:O{next_row + len(rows) - 1}",
-        rows,
+        range_name=f"A{next_row}:O{next_row + len(rows) - 1}",
+        values=rows,
         value_input_option="USER_ENTERED",
     )
 
