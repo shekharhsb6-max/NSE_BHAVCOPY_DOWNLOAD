@@ -638,14 +638,38 @@ def get_worksheet(
         "https://www.googleapis.com/auth/drive.readonly",
     ]
 
+    creds_info = json.loads(creds_json)
+
     creds = Credentials.from_service_account_info(
-        json.loads(creds_json),
+        creds_info,
         scopes=scopes,
+    )
+
+    # Diagnostic: print exactly what we're trying to open and as whom.
+    # An APIError with an HTML "Sorry, unable to open the file" body when
+    # opening the spreadsheet almost always means either (a) this service
+    # account email has not been given Editor access to the sheet, or
+    # (b) spreadsheet_id below is wrong/stale.
+    print(
+        f"Opening spreadsheet_id={spreadsheet_id!r} "
+        f"as service account {creds_info.get('client_email')!r}"
     )
 
     gc = gspread.authorize(creds)
 
-    sh = gc.open_by_key(spreadsheet_id)
+    try:
+        sh = gc.open_by_key(spreadsheet_id)
+
+    except gspread.exceptions.APIError as exc:
+        raise RuntimeError(
+            "Could not open the spreadsheet. This usually means the "
+            f"service account {creds_info.get('client_email')!r} has not "
+            f"been shared as an Editor on spreadsheet_id={spreadsheet_id!r}, "
+            "or that ID is wrong/stale. Share the sheet with that exact "
+            "email address (Editor access) and re-run, or fix "
+            "SPREADSHEET_ID / DEFAULT_SPREADSHEET_ID. "
+            f"Original error: {exc}"
+        ) from exc
 
     try:
         ws = sh.worksheet(sheet_name)
