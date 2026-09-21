@@ -2,31 +2,22 @@
 fetch_bhavcopy.py
 =================
 
-Downloads NSE's daily equity Bhavcopy WITH delivery data and writes it
-into the RAW_DATA tab of Google Sheets.
+NSE CM Bhavcopy + Delivery -> Google Sheets RAW_DATA
 
-Designed for unattended GitHub Actions.
-
-Features:
-- Searches for the most recent available NSE bhavcopy-with-delivery on or
-  before the requested date.
-- Skips weekends while searching backward.
-- Preserves RAW_DATA columns A:M.
-- Adds N = DELIVERY_QTY and O = DELIVERY_PCT.
-- Uses NSE delivery percentage when available; otherwise calculates it.
-- Updates an already-present trade date instead of creating duplicate rows.
-- Supports BHAVCOPY_DATE for testing/backfilling.
-- Supports MAX_LOOKBACK_DAYS.
-
-CHANGES IN THIS VERSION
-------------------------
-- Fixed: every `ws.update(...)` call now uses explicit keyword arguments
-  (range_name=..., values=...) instead of positional arguments. gspread 6.0
-  swapped the positional argument order of Worksheet.update() from
-  (range_name, values) to (values, range_name). Positional calls written
-  against the old order silently break (or raise a TypeError) once the
-  environment installs gspread>=6. Keyword arguments work correctly on
-  both the old and new gspread APIs.
+What this version does:
+1. Searches backward for the latest available NSE bhavcopy-with-delivery.
+2. Handles the current nselib column names:
+       TTL_TRD_QNTY
+       TURNOVER_LACS
+       NO_OF_TRADES
+       DELIV_QTY
+       DELIV_PER
+3. Writes the result to RAW_DATA columns A:O.
+4. If the downloaded trade date already exists, it replaces that date's
+   rows in one batch operation instead of updating thousands of rows
+   individually.
+5. If the date does not exist, it appends the complete batch.
+6. Uses Google Sheets batch_update rather than many individual update calls.
 """
 
 from __future__ import annotations
@@ -40,9 +31,9 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # CONFIG
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 DEFAULT_SPREADSHEET_ID = (
     "1D3E5lyH2QUq55AzsJqSbJj2tNkmOQht_8xUmt0mdvbk"
@@ -52,76 +43,112 @@ DEFAULT_SHEET_NAME = "RAW_DATA"
 DEFAULT_MAX_LOOKBACK_DAYS = 10
 IST = ZoneInfo("Asia/Kolkata")
 
+RAW_HEADERS = [
+    "TRADE_DATE",
+    "SYMBOL",
+    "SERIES",
+    "OPEN",
+    "HIGH",
+    "LOW",
+    "CLOSE",
+    "LAST",
+    "PREV_CLOSE",
+    "TOTAL_TRADED_QTY",
+    "TOTAL_TRADED_VALUE",
+    "TOTAL_TRADES",
+    "ISIN",
+    "DELIVERY_QTY",
+    "DELIVERY_PCT",
+]
 
-# ---------------------------------------------------------------------------
-# TARGET DATE
-# ---------------------------------------------------------------------------
 
-def target_date() -> date:
-    """Return the requested date, or today's date in IST."""
+# ============================================================================
+# DATE
+# ============================================================================
 
-    override = os.environ.get("BHAVCOPY_DATE", "").strip()
+def get_requested_date() -> date:
+    """Use BHAVCOPY_DATE if supplied; otherwise today's date in IST."""
 
-    if override:
-        return datetime.strptime(override, "%Y-%m-%d").date()
+    value = os.environ.get("BHAVCOPY_DATE", "").strip()
+
+    if value:
+        return datetime.strptime(value, "%Y-%m-%d").date()
 
     return datetime.now(IST).date()
 
 
-# ---------------------------------------------------------------------------
-# NSE BHAVCOPY WITH DELIVERY
-# ---------------------------------------------------------------------------
+# ============================================================================
+# COLUMN MATCHING
+# ============================================================================
 
-def download_bhavcopy_with_delivery(
+def normalize_column(value) -> str:
+    return "".join(
+        ch for ch in str(value).strip().upper()
+        if ch.isalnum()
+    )
+
+
+def find_column(
+    df: pd.DataFrame,
+    names: list[str],
+) -> str | None:
+
+    lookup = {
+        normalize_column(col): col
+        for col in df.columns
+    }
+
+    for name in names:
+        key = normalize_column(name)
+
+        if key in lookup:
+            return lookup[key]
+
+    return None
+
+
+# ============================================================================
+# NSE DOWNLOAD
+# ============================================================================
+
+def download_latest_bhavcopy(
     requested_date: date,
 ) -> pd.DataFrame | None:
-    """
-    Download the most recent available NSE bhavcopy-with-delivery on or
-    before requested_date.
-
-    IMPORTANT:
-    We use datetime.timedelta for date arithmetic. This avoids the
-    date/Timestamp .date() error that occurred in the previous version.
-
-    The actual downloaded date is stored in:
-        df.attrs["trade_date"]
-    """
 
     from nselib import capital_market
 
     try:
-        max_lookback = int(
+        lookback = int(
             os.environ.get(
                 "MAX_LOOKBACK_DAYS",
                 str(DEFAULT_MAX_LOOKBACK_DAYS),
             )
         )
     except ValueError:
-        max_lookback = DEFAULT_MAX_LOOKBACK_DAYS
+        lookback = DEFAULT_MAX_LOOKBACK_DAYS
 
-    if max_lookback < 0:
-        max_lookback = DEFAULT_MAX_LOOKBACK_DAYS
+    if lookback < 0:
+        lookback = DEFAULT_MAX_LOOKBACK_DAYS
 
     print(
-        f"Searching for the latest available NSE bhavcopy-with-delivery "
-        f"on or before {requested_date}."
+        f"Searching for the latest available NSE "
+        f"bhavcopy-with-delivery on or before {requested_date}."
     )
 
-    for days_back in range(max_lookback + 1):
+    for days_back in range(lookback + 1):
 
-        # Pure datetime.date arithmetic -- no pandas Timestamp involved.
-        candidate_date = requested_date - timedelta(days=days_back)
+        candidate = requested_date - timedelta(days=days_back)
 
-        # NSE does not publish normal CM bhavcopy on weekends.
-        if candidate_date.weekday() >= 5:
-            print(f"Skipping {candidate_date}: weekend.")
+        # Skip Saturday/Sunday.
+        if candidate.weekday() >= 5:
+            print(f"Skipping {candidate}: weekend.")
             continue
 
-        nse_date = candidate_date.strftime("%d-%m-%Y")
+        nse_date = candidate.strftime("%d-%m-%Y")
 
         print(
             f"Trying NSE bhavcopy-with-delivery for "
-            f"{candidate_date} ..."
+            f"{candidate} ..."
         )
 
         try:
@@ -131,18 +158,16 @@ def download_bhavcopy_with_delivery(
 
         except FileNotFoundError:
             print(
-                f"No NSE bhavcopy-with-delivery for {candidate_date}. "
-                f"Trying the previous date."
+                f"No NSE bhavcopy-with-delivery for {candidate}. "
+                f"Trying previous date."
             )
             continue
 
         except Exception as exc:
-            # Some versions of nselib may raise a generic exception for a
-            # missing NSE file. Treat common "not found/no data" messages
-            # as a reason to continue searching backward.
-            msg = str(exc).lower()
 
-            not_available_terms = (
+            message = str(exc).lower()
+
+            retryable = (
                 "404",
                 "not found",
                 "file not found",
@@ -152,214 +177,123 @@ def download_bhavcopy_with_delivery(
                 "failed to download",
             )
 
-            if any(term in msg for term in not_available_terms):
+            if any(term in message for term in retryable):
+
                 print(
-                    f"No usable NSE copy for {candidate_date}: {exc}"
+                    f"No usable NSE copy for {candidate}: {exc}"
                 )
-                print("Trying the previous date.")
+                print("Trying previous date.")
                 continue
 
             raise RuntimeError(
-                f"Failed while downloading NSE bhavcopy-with-delivery "
-                f"for {candidate_date}: {exc}"
+                f"NSE download failed for {candidate}: {exc}"
             ) from exc
 
         if df is None or df.empty:
+
             print(
-                f"NSE returned no rows for {candidate_date}. "
-                f"Trying the previous date."
+                f"NSE returned no rows for {candidate}. "
+                f"Trying previous date."
             )
+
             continue
 
         print(
             f"SUCCESS: NSE bhavcopy-with-delivery found for "
-            f"{candidate_date}."
+            f"{candidate}."
         )
+
         print(f"NSE returned {len(df)} rows.")
+
         print("NSE columns received:")
         print(df.columns.tolist())
 
-        # Preserve the actual source date for the downstream transformation.
-        df.attrs["trade_date"] = candidate_date
+        # Store actual source date without converting it to Timestamp.
+        df.attrs["trade_date"] = candidate
 
         return df
 
     print(
-        f"No NSE bhavcopy-with-delivery found from {requested_date} "
-        f"back through {max_lookback} calendar days."
+        f"No NSE bhavcopy-with-delivery found in the previous "
+        f"{lookback} calendar days."
     )
 
     return None
 
 
-# ---------------------------------------------------------------------------
-# COLUMN HELPER
-# ---------------------------------------------------------------------------
-
-def _normalize_column_name(value) -> str:
-    """
-    Normalize a column name so that spaces, %, underscores, dots, etc.
-    do not prevent matching.
-    """
-    return "".join(
-        ch for ch in str(value).strip().upper()
-        if ch.isalnum()
-    )
-
-
-def find_column(
-    df: pd.DataFrame,
-    possible_names: list[str],
-) -> str | None:
-    """
-    Find a DataFrame column using robust normalized matching.
-    """
-
-    normalized = {
-        _normalize_column_name(col): col
-        for col in df.columns
-    }
-
-    for name in possible_names:
-        key = _normalize_column_name(name)
-        if key in normalized:
-            return normalized[key]
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# CLEAN / TRANSFORM
-# ---------------------------------------------------------------------------
+# ============================================================================
+# TRANSFORM
+# ============================================================================
 
 def clean_bhavcopy(
     df: pd.DataFrame,
     trade_date: date,
 ) -> pd.DataFrame:
-    """
-    Convert NSE's bhavcopy-with-delivery DataFrame into the exact
-    RAW_DATA structure.
 
-    A:M = existing fields
-    N   = DELIVERY_QTY
-    O   = DELIVERY_PCT
-    """
-
-    # -----------------------------------------------------------------------
-    # Find NSE columns
-    # -----------------------------------------------------------------------
+    # Current nselib names are included explicitly.
 
     symbol_col = find_column(
         df,
-        [
-            "SYMBOL",
-            "Symbol",
-            "TckrSymb",
-        ],
+        ["SYMBOL"],
     )
 
     series_col = find_column(
         df,
-        [
-            "SERIES",
-            "Series",
-            "SctySrs",
-        ],
+        ["SERIES"],
     )
 
     open_col = find_column(
         df,
-        [
-            "OPEN",
-            "Open",
-            "Open Price",
-            "OpnPric",
-        ],
+        ["OPEN_PRICE", "OPEN"],
     )
 
     high_col = find_column(
         df,
-        [
-            "HIGH",
-            "High",
-            "High Price",
-            "HghPric",
-        ],
+        ["HIGH_PRICE", "HIGH"],
     )
 
     low_col = find_column(
         df,
-        [
-            "LOW",
-            "Low",
-            "Low Price",
-            "LwPric",
-        ],
+        ["LOW_PRICE", "LOW"],
     )
 
     close_col = find_column(
         df,
-        [
-            "CLOSE",
-            "Close",
-            "Close Price",
-            "ClsPric",
-        ],
+        ["CLOSE_PRICE", "CLOSE"],
     )
 
     last_col = find_column(
         df,
-        [
-            "LAST",
-            "Last",
-            "Last Price",
-            "LastPric",
-        ],
+        ["LAST_PRICE", "LAST"],
     )
 
     prev_close_col = find_column(
         df,
-        [
-            "PREVCLOSE",
-            "PREV_CLOSE",
-            "Prev Close",
-            "Previous Close",
-            "PrvsClsgPric",
-        ],
+        ["PREV_CLOSE", "PREVIOUS_CLOSE"],
     )
-
-    # nselib bhav_copy_with_delivery() returns these columns in the
-    # current format:
-    #   TTL_TRD_QNTY   = total traded quantity
-    #   TURNOVER_LACS  = turnover in lakh rupees
-    #   NO_OF_TRADES   = number of trades
-    #   DELIV_QTY      = actual deliverable quantity
-    #   DELIV_PER      = delivery percentage
-    #
-    # Keep the older aliases too, so the script remains compatible if
-    # nselib/NSE changes the spelling in a future release.
 
     traded_qty_col = find_column(
         df,
         [
             "TTL_TRD_QNTY",
-            "TOTTRDQTY",
-            "TotalTradedQuantity",
-            "Total Traded Quantity",
-            "Total Traded Qty",
-            "TtlTradgVol",
+            "TOTAL_TRADED_QTY",
+            "TOTAL_TRADED_QUANTITY",
+        ],
+    )
+
+    turnover_lacs_col = find_column(
+        df,
+        [
+            "TURNOVER_LACS",
         ],
     )
 
     traded_value_col = find_column(
         df,
         [
-            "TURNOVER_LACS",
+            "TOTAL_TRADED_VALUE",
             "TOTTRDVAL",
-            "TurnoverInRs",
-            "Turnover",
-            "Total Traded Value",
-            "TtlTrfVal",
+            "TURNOVER",
         ],
     )
 
@@ -367,17 +301,10 @@ def clean_bhavcopy(
         df,
         [
             "NO_OF_TRADES",
-            "TOTALTRADES",
-            "No.ofTrades",
-            "No. of Trades",
-            "Number of Trades",
-            "TtlNbOfTxsExctd",
+            "TOTAL_TRADES",
         ],
     )
 
-    # The nselib delivery output shown in the successful test does not
-    # contain ISIN. ISIN is therefore optional. If it is absent, leave it
-    # blank rather than failing the whole download.
     isin_col = find_column(
         df,
         [
@@ -385,37 +312,22 @@ def clean_bhavcopy(
         ],
     )
 
-    # Actual NSE/nselib delivery quantity.
     delivery_qty_col = find_column(
         df,
         [
             "DELIV_QTY",
-            "DeliverableQty",
-            "Deliverable Qty",
-            "Deliverable Quantity",
-            "Deliverable Volume",
             "DELIVERABLE_QTY",
             "DELIVERY_QTY",
-            "Delivery Qty",
-            "DELIVERY QTY",
-            "DlyQty",
-            "Dly Qty",
+            "DELIVERABLE_QTY",
         ],
     )
 
-    # Actual NSE/nselib delivery percentage.
     delivery_pct_col = find_column(
         df,
         [
             "DELIV_PER",
-            "% Dly Qt to Traded Qty",
-            "%DlyQttoTradedQty",
-            "Percent Dly Qt to Traded Qty",
-            "Delivery Percentage",
             "DELIVERY_PCT",
-            "DELIVERY %",
-            "Delivery %",
-            "DlyQtyPct",
+            "DELIVERY_PERCENT",
         ],
     )
 
@@ -423,7 +335,14 @@ def clean_bhavcopy(
     print("Column mapping detected:")
     print(f"  SYMBOL             : {symbol_col}")
     print(f"  SERIES             : {series_col}")
+    print(f"  OPEN               : {open_col}")
+    print(f"  HIGH               : {high_col}")
+    print(f"  LOW                : {low_col}")
+    print(f"  CLOSE              : {close_col}")
+    print(f"  LAST               : {last_col}")
+    print(f"  PREV_CLOSE         : {prev_close_col}")
     print(f"  TOTAL_TRADED_QTY   : {traded_qty_col}")
+    print(f"  TURNOVER_LACS      : {turnover_lacs_col}")
     print(f"  TOTAL_TRADED_VALUE : {traded_value_col}")
     print(f"  TOTAL_TRADES       : {trades_col}")
     print(f"  ISIN               : {isin_col}")
@@ -441,32 +360,34 @@ def clean_bhavcopy(
         "LAST": last_col,
         "PREV_CLOSE": prev_close_col,
         "TOTAL_TRADED_QTY": traded_qty_col,
-        "TOTAL_TRADED_VALUE": traded_value_col,
         "TOTAL_TRADES": trades_col,
         "DELIVERY_QTY": delivery_qty_col,
+        "DELIVERY_PCT": delivery_pct_col,
     }
 
     missing = [
-        name
-        for name, column in required.items()
-        if column is None
+        key
+        for key, value in required.items()
+        if value is None
     ]
 
     if missing:
+
         raise RuntimeError(
             "NSE bhavcopy-with-delivery is missing required "
             f"column(s): {missing}. "
-            f"Actual columns returned by nselib: {df.columns.tolist()}"
+            f"Actual columns returned by nselib: "
+            f"{df.columns.tolist()}"
         )
-
-    # -----------------------------------------------------------------------
-    # Build output
-    # -----------------------------------------------------------------------
 
     out = pd.DataFrame()
 
-    # Existing RAW_DATA fields A:M
+    # ------------------------------------------------------------------------
+    # A:M
+    # ------------------------------------------------------------------------
+
     out["TRADE_DATE"] = trade_date.isoformat()
+
     out["SYMBOL"] = df[symbol_col]
     out["SERIES"] = df[series_col]
     out["OPEN"] = df[open_col]
@@ -477,59 +398,53 @@ def clean_bhavcopy(
     out["PREV_CLOSE"] = df[prev_close_col]
     out["TOTAL_TRADED_QTY"] = df[traded_qty_col]
 
-    # nselib's TURNOVER_LACS is expressed in lakh rupees.
-    # RAW_DATA.TOTAL_TRADED_VALUE is kept in rupees, matching the existing
-    # RAW_DATA convention. Therefore convert lakhs -> rupees when the
-    # source column is TURNOVER_LACS.
-    traded_value = pd.to_numeric(
-        df[traded_value_col],
-        errors="coerce",
-    )
+    # NSE's TURNOVER_LACS is in lakh rupees.
+    # Convert to actual rupees for the existing RAW_DATA structure.
+    if turnover_lacs_col is not None:
 
-    if _normalize_column_name(traded_value_col) == "TURNOVERLACS":
-        traded_value = traded_value * 100000
+        turnover_lacs = pd.to_numeric(
+            df[turnover_lacs_col],
+            errors="coerce",
+        )
 
-    out["TOTAL_TRADED_VALUE"] = traded_value
+        out["TOTAL_TRADED_VALUE"] = turnover_lacs * 100000
+
+        print(
+            "TOTAL_TRADED_VALUE mapped from TURNOVER_LACS "
+            "and converted from ₹ lakh to ₹."
+        )
+
+    elif traded_value_col is not None:
+
+        out["TOTAL_TRADED_VALUE"] = df[traded_value_col]
+
+    else:
+
+        out["TOTAL_TRADED_VALUE"] = None
+
     out["TOTAL_TRADES"] = df[trades_col]
 
+    # The current nselib delivery bhavcopy does not return ISIN.
+    # Preserve the RAW_DATA column and leave it blank for this download.
     if isin_col is not None:
         out["ISIN"] = df[isin_col]
     else:
-        out["ISIN"] = ""
-
-    # N = DELIVERY_QTY
-    out["DELIVERY_QTY"] = df[delivery_qty_col]
-
-    # O = DELIVERY_PCT
-    # Prefer NSE-provided percentage when available.
-    if delivery_pct_col is not None:
-        out["DELIVERY_PCT"] = df[delivery_pct_col]
-        print("Using NSE-provided Delivery %.")
-    else:
+        out["ISIN"] = None
         print(
-            "NSE delivery percentage column not supplied. "
-            "Calculating Delivery % from Delivery Qty / Traded Qty."
+            "ISIN column not returned by nselib; "
+            "ISIN will be blank for these downloaded rows."
         )
 
-        traded_qty = pd.to_numeric(
-            out["TOTAL_TRADED_QTY"],
-            errors="coerce",
-        )
+    # ------------------------------------------------------------------------
+    # N:O
+    # ------------------------------------------------------------------------
 
-        delivery_qty = pd.to_numeric(
-            out["DELIVERY_QTY"],
-            errors="coerce",
-        )
+    out["DELIVERY_QTY"] = df[delivery_qty_col]
+    out["DELIVERY_PCT"] = df[delivery_pct_col]
 
-        out["DELIVERY_PCT"] = (
-            delivery_qty
-            .div(traded_qty.replace(0, pd.NA))
-            .mul(100)
-        )
-
-    # -----------------------------------------------------------------------
-    # Clean numeric columns
-    # -----------------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # Numeric conversion
+    # ------------------------------------------------------------------------
 
     numeric_columns = [
         "OPEN",
@@ -546,14 +461,11 @@ def clean_bhavcopy(
     ]
 
     for column in numeric_columns:
+
         out[column] = pd.to_numeric(
             out[column],
             errors="coerce",
         )
-
-    # -----------------------------------------------------------------------
-    # Remove rows without a symbol
-    # -----------------------------------------------------------------------
 
     out["SYMBOL"] = (
         out["SYMBOL"]
@@ -561,415 +473,387 @@ def clean_bhavcopy(
         .str.strip()
     )
 
+    out["SERIES"] = (
+        out["SERIES"]
+        .astype(str)
+        .str.strip()
+    )
+
+    # Remove unusable rows.
     out = out[
         out["SYMBOL"].ne("")
         & out["SYMBOL"].ne("nan")
     ]
 
-    # -----------------------------------------------------------------------
-    # Convert NaN to None for gspread
-    # -----------------------------------------------------------------------
+    # Exact A:O order.
+    out = out[RAW_HEADERS]
 
+    # Replace pandas NaN with None.
     out = out.where(pd.notnull(out), None)
-
-    # -----------------------------------------------------------------------
-    # Exact RAW_DATA column order
-    # -----------------------------------------------------------------------
-
-    columns = [
-        "TRADE_DATE",
-        "SYMBOL",
-        "SERIES",
-        "OPEN",
-        "HIGH",
-        "LOW",
-        "CLOSE",
-        "LAST",
-        "PREV_CLOSE",
-        "TOTAL_TRADED_QTY",
-        "TOTAL_TRADED_VALUE",
-        "TOTAL_TRADES",
-        "ISIN",
-        "DELIVERY_QTY",
-        "DELIVERY_PCT",
-    ]
-
-    out = out[columns]
 
     print(f"Cleaned {len(out)} rows.")
 
     print(
         "Delivery Qty available:",
-        out["DELIVERY_QTY"].notna().sum(),
+        sum(
+            value is not None
+            for value in out["DELIVERY_QTY"]
+        ),
         "rows",
     )
 
     print(
         "Delivery % available:",
-        out["DELIVERY_PCT"].notna().sum(),
+        sum(
+            value is not None
+            for value in out["DELIVERY_PCT"]
+        ),
         "rows",
     )
 
     return out
 
 
-# ---------------------------------------------------------------------------
-# GOOGLE SHEETS
-# ---------------------------------------------------------------------------
+# ============================================================================
+# GOOGLE SHEETS CONNECTION
+# ============================================================================
 
 def get_worksheet(
     spreadsheet_id: str,
     sheet_name: str,
 ):
-    """Connect to Google Sheets using the service account."""
-
     import gspread
     from google.oauth2.service_account import Credentials
 
-    creds_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    credentials_json = os.environ.get(
+        "GOOGLE_SERVICE_ACCOUNT_JSON"
+    )
 
-    if not creds_json:
+    if not credentials_json:
+
         raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is not set."
+            "GOOGLE_SERVICE_ACCOUNT_JSON GitHub secret "
+            "is not available."
         )
+
+    try:
+        credentials_info = json.loads(credentials_json)
+
+    except json.JSONDecodeError as exc:
+
+        raise RuntimeError(
+            "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON."
+        ) from exc
 
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive",
     ]
 
-    creds_info = json.loads(creds_json)
-
-    creds = Credentials.from_service_account_info(
-        creds_info,
+    credentials = Credentials.from_service_account_info(
+        credentials_info,
         scopes=scopes,
     )
 
-    # Diagnostic: print exactly what we're trying to open and as whom.
-    # An APIError with an HTML "Sorry, unable to open the file" body when
-    # opening the spreadsheet almost always means either (a) this service
-    # account email has not been given Editor access to the sheet, or
-    # (b) spreadsheet_id below is wrong/stale.
+    gc = gspread.authorize(credentials)
+
     print(
-        f"Opening spreadsheet_id={spreadsheet_id!r} "
-        f"as service account {creds_info.get('client_email')!r}"
+        f"Opening spreadsheet: {spreadsheet_id}"
     )
 
-    gc = gspread.authorize(creds)
+    spreadsheet = gc.open_by_key(
+        spreadsheet_id
+    )
+
+    print(
+        f"Spreadsheet opened: {spreadsheet.title}"
+    )
 
     try:
-        sh = gc.open_by_key(spreadsheet_id)
 
-    except gspread.exceptions.APIError as exc:
-        raise RuntimeError(
-            "Could not open the spreadsheet. This usually means the "
-            f"service account {creds_info.get('client_email')!r} has not "
-            f"been shared as an Editor on spreadsheet_id={spreadsheet_id!r}, "
-            "or that ID is wrong/stale. Share the sheet with that exact "
-            "email address (Editor access) and re-run, or fix "
-            "SPREADSHEET_ID / DEFAULT_SPREADSHEET_ID. "
-            f"Original error: {exc}"
-        ) from exc
-
-    try:
-        ws = sh.worksheet(sheet_name)
-
-    except gspread.WorksheetNotFound:
-        print(
-            f'"{sheet_name}" not found — creating it.'
+        worksheet = spreadsheet.worksheet(
+            sheet_name
         )
 
-        ws = sh.add_worksheet(
+    except gspread.WorksheetNotFound:
+
+        print(
+            f'Worksheet "{sheet_name}" not found. '
+            f"Creating it."
+        )
+
+        worksheet = spreadsheet.add_worksheet(
             title=sheet_name,
             rows=1000,
             cols=20,
         )
 
-    return ws
+    print(
+        f"Worksheet opened: {worksheet.title}"
+    )
+
+    return spreadsheet, worksheet
 
 
-# ---------------------------------------------------------------------------
-# GOOGLE SHEETS WRITE
-# ---------------------------------------------------------------------------
+# ============================================================================
+# SHEET HEADER
+# ============================================================================
 
-def write_to_sheet(
-    ws,
+def ensure_header(worksheet) -> None:
+
+    current = worksheet.row_values(1)
+
+    if not current:
+
+        print(
+            "RAW_DATA is empty. Creating A:O header."
+        )
+
+        worksheet.update(
+            "A1:O1",
+            [RAW_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+
+        return
+
+    # Existing old A:M structure.
+    old_header = RAW_HEADERS[:13]
+
+    if current[:13] == old_header:
+
+        print(
+            "Existing RAW_DATA has A:M header. "
+            "Extending it to A:O."
+        )
+
+        worksheet.update(
+            "A1:O1",
+            [RAW_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+
+        return
+
+    # Already correct.
+    if current[:15] == RAW_HEADERS:
+
+        return
+
+    print("Existing RAW_DATA header:")
+    print(current)
+
+    print("Expected RAW_DATA header:")
+    print(RAW_HEADERS)
+
+    raise RuntimeError(
+        "RAW_DATA header does not match the expected structure."
+    )
+
+
+# ============================================================================
+# GOOGLE SHEETS BATCH WRITE
+# ============================================================================
+
+def write_date_batch(
+    spreadsheet,
+    worksheet,
     df: pd.DataFrame,
-    mode: str,
 ) -> None:
     """
-    Write data to RAW_DATA.
+    Write one trade date as one complete batch.
 
-    overwrite:
-        Replace the entire sheet.
+    If the date exists:
+        - delete those existing rows in one Sheets API batch request;
+        - insert the fresh rows in their place.
 
-    append:
-        If the downloaded trade date is new, append it.
-        If that trade date already exists, update existing rows and append
-        only symbols that were not already present for that date.
+    If the date does not exist:
+        - append the fresh rows.
 
-    This allows an older existing bhavcopy to be enriched with delivery data
-    without creating duplicate rows.
-
-    NOTE: every call to ws.update() below uses explicit keyword arguments
-    (range_name=..., values=...). gspread 6.0 swapped the positional
-    argument order of Worksheet.update() from (range_name, values) to
-    (values, range_name). Positional calls written against the old order
-    break once the environment has gspread>=6 installed. Keyword arguments
-    are safe on both the pre-6.0 and 6.0+ APIs.
+    This avoids thousands of individual worksheet.update() calls.
     """
 
-    header = df.columns.tolist()
-    rows = df.astype(object).values.tolist()
+    source_date = str(
+        df["TRADE_DATE"].iloc[0]
+    )
 
-    # -----------------------------------------------------------------------
-    # OVERWRITE
-    # -----------------------------------------------------------------------
+    print(
+        f"Preparing Google Sheets batch write for "
+        f"trade date {source_date}."
+    )
 
-    if mode == "overwrite":
+    # ------------------------------------------------------------------------
+    # Read current sheet once.
+    # ------------------------------------------------------------------------
 
-        ws.clear()
+    values = worksheet.get_all_values()
 
-        ws.update(
-            range_name="A1:O1",
-            values=[header],
-            value_input_option="USER_ENTERED",
-        )
+    if not values:
 
-        if rows:
-            ws.update(
-                range_name=f"A2:O{len(rows) + 1}",
-                values=rows,
-                value_input_option="USER_ENTERED",
-            )
+        ensure_header(worksheet)
 
-        print(
-            f"Overwrote {ws.title} with {len(rows)} rows."
-        )
+        values = worksheet.get_all_values()
 
-        return
+    # ------------------------------------------------------------------------
+    # Find rows for source date.
+    # ------------------------------------------------------------------------
 
-    # -----------------------------------------------------------------------
-    # APPEND / UPDATE
-    # -----------------------------------------------------------------------
-
-    first_row = ws.row_values(1)
-
-    old_header = [
-        "TRADE_DATE",
-        "SYMBOL",
-        "SERIES",
-        "OPEN",
-        "HIGH",
-        "LOW",
-        "CLOSE",
-        "LAST",
-        "PREV_CLOSE",
-        "TOTAL_TRADED_QTY",
-        "TOTAL_TRADED_VALUE",
-        "TOTAL_TRADES",
-        "ISIN",
-    ]
-
-    # Empty sheet
-    if not first_row:
-
-        ws.update(
-            range_name="A1:O1",
-            values=[header],
-            value_input_option="USER_ENTERED",
-        )
-
-        first_row = header
-
-        print(
-            "Created RAW_DATA header with DELIVERY columns."
-        )
-
-    # Existing old A:M header
-    elif first_row[:13] == old_header:
-
-        print(
-            "Existing RAW_DATA uses the old 13-column header. "
-            "Expanding it to 15 columns."
-        )
-
-        ws.update(
-            range_name="A1:O1",
-            values=[header],
-            value_input_option="USER_ENTERED",
-        )
-
-        first_row = header
-
-    # Existing new header
-    elif first_row != header:
-
-        print(
-            "Warning: existing RAW_DATA header differs "
-            "from the expected header."
-        )
-        print("Existing header:", first_row)
-        print("Expected header:", header)
-
-        raise RuntimeError(
-            "RAW_DATA header does not match the expected structure. "
-            "No rows were written."
-        )
-
-    # -----------------------------------------------------------------------
-    # Identify source date
-    # -----------------------------------------------------------------------
-
-    source_date = str(df["TRADE_DATE"].iloc[0]).strip()
-
-    existing_values = ws.get_all_values()
-
-    date_rows = []
+    matching_rows = []
 
     for row_number, row in enumerate(
-        existing_values[1:],
+        values[1:],
         start=2,
     ):
-        if row and str(row[0]).strip() == source_date:
-            date_rows.append(row_number)
 
-    # -----------------------------------------------------------------------
-    # Existing date -> update rather than duplicate
-    # -----------------------------------------------------------------------
+        if (
+            row
+            and len(row) > 0
+            and str(row[0]).strip() == source_date
+        ):
 
-    if date_rows:
+            matching_rows.append(row_number)
+
+    rows = df.astype(object).values.tolist()
+
+    # ------------------------------------------------------------------------
+    # Case 1: date already exists.
+    # ------------------------------------------------------------------------
+
+    if matching_rows:
+
+        first_row = min(matching_rows)
 
         print(
-            f"Trade date {source_date} already exists in RAW_DATA "
-            f"({len(date_rows)} rows). Updating existing date instead "
-            f"of appending duplicates."
+            f"Trade date {source_date} already has "
+            f"{len(matching_rows)} rows."
         )
 
-        # Incoming lookup by SYMBOL + SERIES
-        incoming = {}
+        print(
+            f"Replacing those rows with {len(rows)} fresh rows."
+        )
 
-        for row in rows:
-            key = (
-                str(row[1]).strip(),
-                str(row[2]).strip(),
-            )
-            incoming[key] = row
+        # Google Sheets row indexes are zero-based in batch requests.
+        start_index = first_row - 1
+        end_index = start_index + len(matching_rows)
 
-        existing_keys = set()
-        updated = 0
+        sheet_id = worksheet.id
 
-        for row_number in date_rows:
+        # One batch request:
+        # 1. delete existing date rows
+        # 2. insert the new number of rows
+        spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": start_index,
+                                "endIndex": end_index,
+                            }
+                        }
+                    },
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": start_index,
+                                "endIndex": start_index + len(rows),
+                            },
+                            "inheritFromBefore": False,
+                        }
+                    },
+                ]
+            }
+        )
 
-            existing_row = existing_values[row_number - 1]
-
-            symbol = (
-                str(existing_row[1]).strip()
-                if len(existing_row) > 1
-                else ""
-            )
-
-            series = (
-                str(existing_row[2]).strip()
-                if len(existing_row) > 2
-                else ""
-            )
-
-            key = (symbol, series)
-            existing_keys.add(key)
-
-            new_row = incoming.get(key)
-
-            if new_row is not None:
-
-                ws.update(
-                    range_name=f"A{row_number}:O{row_number}",
-                    values=[new_row],
-                    value_input_option="USER_ENTERED",
-                )
-
-                updated += 1
-
-        # Append symbols present in incoming data but absent from the
-        # existing date.
-        missing_rows = [
-            row
-            for key, row in incoming.items()
-            if key not in existing_keys
-        ]
-
-        if missing_rows:
-
-            ws.append_rows(
-                missing_rows,
-                value_input_option="USER_ENTERED",
-            )
+        # One range write for the entire date.
+        worksheet.update(
+            f"A{first_row}:O{first_row + len(rows) - 1}",
+            rows,
+            value_input_option="USER_ENTERED",
+        )
 
         print(
-            f"Updated {updated} existing rows for {source_date}; "
-            f"appended {len(missing_rows)} previously missing rows."
+            f"Successfully replaced {source_date} "
+            f"with {len(rows)} rows."
         )
 
         return
 
-    # -----------------------------------------------------------------------
-    # New trade date -> append normally
-    # -----------------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # Case 2: new date.
+    # ------------------------------------------------------------------------
 
-    ws.append_rows(
+    next_row = len(values) + 1
+
+    print(
+        f"Trade date {source_date} is new."
+    )
+
+    print(
+        f"Appending {len(rows)} rows starting at row {next_row}."
+    )
+
+    worksheet.update(
+        f"A{next_row}:O{next_row + len(rows) - 1}",
         rows,
         value_input_option="USER_ENTERED",
     )
 
     print(
-        f"Appended {len(rows)} rows to {ws.title}."
+        f"Successfully appended {len(rows)} rows "
+        f"for {source_date}."
     )
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # MAIN
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 def main() -> int:
 
-    requested_date = target_date()
+    requested_date = get_requested_date()
 
-    print("=" * 60)
+    print("=" * 70)
     print("NSE BHAVCOPY + DELIVERY")
-    print("=" * 60)
-    print(f"Requested date : {requested_date}")
+    print("=" * 70)
 
-    # -----------------------------------------------------------------------
-    # Download latest available copy.
-    #
-    # IMPORTANT: We deliberately do NOT exit just because requested_date is
-    # a weekend. The downloader itself skips weekends and searches backward.
-    # -----------------------------------------------------------------------
+    print(
+        f"Requested date : {requested_date}"
+    )
 
-    raw_df = download_bhavcopy_with_delivery(
+    # ------------------------------------------------------------------------
+    # Download latest available NSE copy.
+    # ------------------------------------------------------------------------
+
+    raw_df = download_latest_bhavcopy(
         requested_date
     )
 
     if raw_df is None:
 
         print(
-            "No NSE bhavcopy-with-delivery could be found "
-            "within the configured lookback period."
+            "No available NSE bhavcopy-with-delivery "
+            "was found within the lookback period."
         )
 
         return 0
 
-    # The actual downloaded copy may be older than the requested date.
     actual_trade_date = raw_df.attrs.get(
         "trade_date",
         requested_date,
     )
 
-    print(f"Downloaded date: {actual_trade_date}")
+    print(
+        f"Downloaded date: {actual_trade_date}"
+    )
 
-    # -----------------------------------------------------------------------
-    # Clean
-    # -----------------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # Transform.
+    # ------------------------------------------------------------------------
 
     df = clean_bhavcopy(
         raw_df,
@@ -979,82 +863,116 @@ def main() -> int:
     if df.empty:
 
         print(
-            "Downloaded data contained zero usable rows."
+            "The downloaded NSE file contained no usable rows."
         )
 
         return 0
 
-    # -----------------------------------------------------------------------
-    # Configuration
-    # -----------------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # Google Sheets configuration.
+    # ------------------------------------------------------------------------
 
-    spreadsheet_id = os.environ.get(
-        "SPREADSHEET_ID",
-        DEFAULT_SPREADSHEET_ID,
+    # Fixed Google Spreadsheet ID
+    # This is the spreadsheet used by the ETF scanner.
+    spreadsheet_id = "1D3E5lyH2QUq55AzsJqSbJj2tNkmOQht_8xUmt0mdvbk"
+
+    # Keep RAW_DATA as the target worksheet unless explicitly changed.
+    sheet_name = (
+        os.environ.get("SHEET_NAME", "").strip()
+        or DEFAULT_SHEET_NAME
     )
 
-    sheet_name = os.environ.get(
-        "SHEET_NAME",
-        DEFAULT_SHEET_NAME,
+    print(
+        f"Target spreadsheet ID: {spreadsheet_id}"
     )
 
-    mode = os.environ.get(
-        "BHAVCOPY_MODE",
-        "append",
-    ).lower()
+    if not spreadsheet_id:
+        raise RuntimeError("Spreadsheet ID is empty.")
 
-    if mode not in ("append", "overwrite"):
+    print(
+        f"Target worksheet     : {sheet_name}"
+    )
 
-        print(
-            'BHAVCOPY_MODE must be "append" or "overwrite".',
-            file=sys.stderr,
-        )
+    # ------------------------------------------------------------------------
+    # Connect.
+    # ------------------------------------------------------------------------
 
-        return 1
-
-    # -----------------------------------------------------------------------
-    # Google Sheets
-    # -----------------------------------------------------------------------
-
-    ws = get_worksheet(
+    spreadsheet, worksheet = get_worksheet(
         spreadsheet_id,
         sheet_name,
     )
 
-    write_to_sheet(
-        ws,
+    # ------------------------------------------------------------------------
+    # Ensure A:O header.
+    # ------------------------------------------------------------------------
+
+    ensure_header(worksheet)
+
+    # ------------------------------------------------------------------------
+    # Batch write.
+    # ------------------------------------------------------------------------
+
+    write_date_batch(
+        spreadsheet,
+        worksheet,
         df,
-        mode,
     )
 
-    # -----------------------------------------------------------------------
-    # Summary
-    # -----------------------------------------------------------------------
+    # ------------------------------------------------------------------------
+    # Final summary.
+    # ------------------------------------------------------------------------
 
     print("")
-    print("=" * 60)
-    print("NSE BHAVCOPY + DELIVERY COMPLETED")
-    print("=" * 60)
-    print(f"Requested date   : {requested_date}")
-    print(f"Downloaded date  : {actual_trade_date}")
-    print(f"Rows written     : {len(df)}")
+    print("=" * 70)
+    print("COMPLETED SUCCESSFULLY")
+    print("=" * 70)
+
     print(
-        "Delivery Qty     :",
+        f"Requested date  : {requested_date}"
+    )
+
+    print(
+        f"Downloaded date : {actual_trade_date}"
+    )
+
+    print(
+        f"Rows processed  : {len(df)}"
+    )
+
+    print(
+        "Delivery Qty    :",
         df["DELIVERY_QTY"].notna().sum(),
     )
+
     print(
-        "Delivery %       :",
+        "Delivery %      :",
         df["DELIVERY_PCT"].notna().sum(),
     )
-    print(f"Google Sheet     : {sheet_name}")
-    print("=" * 60)
+
+    print(
+        f"Sheet           : {sheet_name}"
+    )
+
+    print("=" * 70)
 
     return 0
 
 
-# ---------------------------------------------------------------------------
+# ============================================================================
 # ENTRY POINT
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+
+    except Exception as exc:
+
+        print("")
+        print("=" * 70)
+        print("FETCH SCRIPT FAILED")
+        print("=" * 70)
+        print(f"{type(exc).__name__}: {exc}")
+        print("=" * 70)
+
+        raise
