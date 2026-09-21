@@ -756,11 +756,13 @@ def write_date_batch(
                 continue
 
             try:
-                if pd.isna(value):
-                    safe_row.append(None)
-                    continue
+                missing = pd.isna(value)
             except (TypeError, ValueError):
-                pass
+                missing = False
+
+            if isinstance(missing, bool) and missing:
+                safe_row.append(None)
+                continue
 
             if hasattr(value, "item"):
                 try:
@@ -775,14 +777,23 @@ def write_date_batch(
     # Hard validation before making the API request.
     for row_index, row in enumerate(rows, start=1):
         for col_index, value in enumerate(row, start=1):
+            # None is valid JSON and is intentionally used for blank
+            # fields such as ISIN, which NSE does not return here.
+            if value is None:
+                continue
+
             try:
-                if pd.isna(value):
-                    raise RuntimeError(
-                        f"Unsafe NaN/NaT value remains at "
-                        f"row {row_index}, column {col_index}."
-                    )
+                missing = pd.isna(value)
             except (TypeError, ValueError):
-                pass
+                missing = False
+
+            # pd.isna() can return an array-like value for some objects.
+            # Only a scalar True means an unsafe missing value here.
+            if isinstance(missing, bool) and missing:
+                raise RuntimeError(
+                    f"Unsafe NaN/NaT value remains at "
+                    f"row {row_index}, column {col_index}."
+                )
 
     print(
         f"Prepared {len(rows)} JSON-safe rows for Google Sheets."
