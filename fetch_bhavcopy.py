@@ -9,7 +9,7 @@ The program is designed to run unattended through GitHub Actions.
 
 It:
   - skips weekends cleanly
-  - skips NSE holidays / dates for which NSE has not published data
+  - automatically falls back to the most recent earlier NSE copy when the requested date is unavailable
   - downloads NSE bhavcopy including DeliverableQty
   - calculates Delivery % from DeliverableQty / Total Traded Qty
   - preserves the existing RAW_DATA columns A:M
@@ -43,6 +43,12 @@ BHAVCOPY_DATE
     Optional.
     YYYY-MM-DD.
     If omitted, today's date in IST is used.
+    If that date is unavailable, the program searches backward for the
+    most recent available NSE bhavcopy-with-delivery.
+
+MAX_LOOKBACK_DAYS
+    Optional.
+    Maximum number of calendar days to search backward. Default is 10.
 
 Example:
     BHAVCOPY_DATE=2026-09-18
@@ -70,6 +76,8 @@ DEFAULT_SPREADSHEET_ID = (
 DEFAULT_SHEET_NAME = "RAW_DATA"
 
 IST = ZoneInfo("Asia/Kolkata")
+
+DEFAULT_MAX_LOOKBACK_DAYS = 10
 
 
 # ---------------------------------------------------------------------------
@@ -103,68 +111,104 @@ def download_bhavcopy_with_delivery(
     trade_date: date
 ) -> pd.DataFrame | None:
     """
-    Downloads NSE's daily bhavcopy including delivery quantity.
+    Downloads the latest available NSE bhavcopy-with-delivery on or before
+    ``trade_date``.
 
-    Uses nselib's current bhav_copy_with_delivery() function.
+    If NSE has not published the file for the requested date (for example,
+    because the run happened before publication, or because the date was a
+    weekend/holiday), the function searches backward one calendar day at a
+    time until it finds the most recent available copy.
 
-    Returns:
-        DataFrame
-        None if NSE has no data for the requested date.
+    The actual date of the downloaded copy is stored in
+    ``df.attrs["trade_date"]`` so the Google Sheet receives the correct
+    trading date rather than the date on which the workflow happened to run.
     """
 
     from nselib import capital_market
 
-    nse_date = trade_date.strftime("%d-%m-%Y")
-
-    print(
-        f"Downloading NSE bhavcopy with delivery for "
-        f"{trade_date} ..."
-    )
-
     try:
-
-        df = capital_market.bhav_copy_with_delivery(
-            trade_date=nse_date
+        max_lookback = int(
+            os.environ.get(
+                "MAX_LOOKBACK_DAYS",
+                DEFAULT_MAX_LOOKBACK_DAYS
+            )
         )
+    except ValueError:
+        max_lookback = DEFAULT_MAX_LOOKBACK_DAYS
 
-    except FileNotFoundError:
+    if max_lookback < 0:
+        max_lookback = DEFAULT_MAX_LOOKBACK_DAYS
+
+    print(
+        f"Searching for the latest available NSE bhavcopy-with-delivery "
+        f"on or before {trade_date}."
+    )
+
+    for days_back in range(max_lookback + 1):
+
+        candidate_date = trade_date - pd.Timedelta(days=days_back)
+        candidate_date = candidate_date.date()
+
+        # Do not waste an NSE request on weekends.
+        if candidate_date.weekday() >= 5:
+            print(
+                f"Skipping {candidate_date}: weekend."
+            )
+            continue
+
+        nse_date = candidate_date.strftime("%d-%m-%Y")
 
         print(
-            f"No NSE bhavcopy-with-delivery available for "
-            f"{trade_date}. "
-            f"Likely weekend, holiday, or file not yet published."
+            f"Trying NSE bhavcopy-with-delivery for "
+            f"{candidate_date} ..."
         )
 
-        return None
+        try:
+            df = capital_market.bhav_copy_with_delivery(
+                trade_date=nse_date
+            )
 
-    except Exception as exc:
+        except FileNotFoundError:
+            print(
+                f"No NSE bhavcopy-with-delivery for {candidate_date}. "
+                f"Trying the previous date."
+            )
+            continue
 
-        raise RuntimeError(
-            f"Failed to download NSE bhavcopy-with-delivery "
-            f"for {trade_date}: {exc}"
-        ) from exc
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed while downloading NSE bhavcopy-with-delivery "
+                f"for {candidate_date}: {exc}"
+            ) from exc
 
-    if df is None or df.empty:
+        if df is None or df.empty:
+            print(
+                f"NSE returned no rows for {candidate_date}. "
+                f"Trying the previous date."
+            )
+            continue
 
         print(
-            f"NSE returned no rows for {trade_date}."
+            f"SUCCESS: NSE bhavcopy-with-delivery found for "
+            f"{candidate_date}."
         )
+        print(
+            f"NSE returned {len(df)} rows."
+        )
+        print("NSE columns received:")
+        print(df.columns.tolist())
 
-        return None
+        # Preserve the actual source date for the downstream transformation.
+        df.attrs["trade_date"] = candidate_date
+
+        return df
 
     print(
-        f"NSE returned {len(df)} rows."
+        f"No NSE bhavcopy-with-delivery found from {trade_date} "
+        f"back through {max_lookback} calendar days."
     )
 
-    print(
-        "NSE columns received:"
-    )
-
-    print(
-        df.columns.tolist()
-    )
-
-    return df
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -625,16 +669,20 @@ def write_to_sheet(
     """
     Writes data to Google Sheets.
 
-    Special handling:
-    If RAW_DATA already has the old 13-column header,
-    the header is automatically expanded to 15 columns.
+    In ``overwrite`` mode the sheet is replaced as before.
 
-    Existing historical rows remain intact.
-    Their DELIVERY_QTY and DELIVERY_PCT cells will simply be blank.
+    In ``append`` mode:
+      - a new trade date is appended normally;
+      - if the trade date already exists in RAW_DATA, the existing rows for
+        that date are updated with the new 15-column data instead of creating
+        duplicate rows.
+
+    This is important when the script falls back to the last available NSE
+    copy: an already-present historical date can be enriched with DELIVERY
+    data without duplicating the entire bhavcopy.
     """
 
     header = df.columns.tolist()
-
     rows = df.astype(object).values.tolist()
 
     # -----------------------------------------------------------------------
@@ -657,80 +705,127 @@ def write_to_sheet(
         return
 
     # -----------------------------------------------------------------------
-    # APPEND
+    # APPEND / UPDATE
     # -----------------------------------------------------------------------
 
     first_row = ws.row_values(1)
 
+    old_header = [
+        "TRADE_DATE",
+        "SYMBOL",
+        "SERIES",
+        "OPEN",
+        "HIGH",
+        "LOW",
+        "CLOSE",
+        "LAST",
+        "PREV_CLOSE",
+        "TOTAL_TRADED_QTY",
+        "TOTAL_TRADED_VALUE",
+        "TOTAL_TRADES",
+        "ISIN",
+    ]
+
     # Empty sheet
     if not first_row:
-
         ws.update(
             "A1:O1",
             [header],
             value_input_option="USER_ENTERED"
         )
+        first_row = header
+        print("Created RAW_DATA header with DELIVERY columns.")
 
+    elif first_row[:13] == old_header:
         print(
-            "Created RAW_DATA header with DELIVERY columns."
+            "Existing RAW_DATA uses the old 13-column header. "
+            "Expanding it to 15 columns."
+        )
+        ws.update(
+            "A1:O1",
+            [header],
+            value_input_option="USER_ENTERED"
+        )
+        first_row = header
+
+    elif first_row != header:
+        print("Warning: existing RAW_DATA header differs from the expected header.")
+        print("Existing header:", first_row)
+        print("Expected header:", header)
+        raise RuntimeError(
+            "RAW_DATA header does not match the expected structure. "
+            "No rows were written."
         )
 
-    else:
+    # -----------------------------------------------------------------------
+    # If this date already exists, update it instead of duplicating it.
+    # -----------------------------------------------------------------------
 
-        # Existing old 13-column header
-        old_header = [
-            "TRADE_DATE",
-            "SYMBOL",
-            "SERIES",
-            "OPEN",
-            "HIGH",
-            "LOW",
-            "CLOSE",
-            "LAST",
-            "PREV_CLOSE",
-            "TOTAL_TRADED_QTY",
-            "TOTAL_TRADED_VALUE",
-            "TOTAL_TRADES",
-            "ISIN",
+    source_date = str(df["TRADE_DATE"].iloc[0])
+    existing_values = ws.get_all_values()
+
+    date_rows = []
+    for row_number, row in enumerate(existing_values[1:], start=2):
+        if row and str(row[0]).strip() == source_date:
+            date_rows.append(row_number)
+
+    if date_rows:
+        print(
+            f"Trade date {source_date} already exists in RAW_DATA "
+            f"({len(date_rows)} rows). Updating existing date instead "
+            f"of appending duplicates."
+        )
+
+        # Build a lookup of incoming rows by SYMBOL + SERIES.
+        incoming = {}
+        for row in rows:
+            key = (str(row[1]).strip(), str(row[2]).strip())
+            incoming[key] = row
+
+        updated = 0
+        for row_number in date_rows:
+            existing_row = existing_values[row_number - 1]
+            symbol = str(existing_row[1]).strip() if len(existing_row) > 1 else ""
+            series = str(existing_row[2]).strip() if len(existing_row) > 2 else ""
+            key = (symbol, series)
+
+            new_row = incoming.get(key)
+            if new_row is not None:
+                ws.update(
+                    f"A{row_number}:O{row_number}",
+                    [new_row],
+                    value_input_option="USER_ENTERED"
+                )
+                updated += 1
+
+        # Append any symbols that were not already present for that date.
+        existing_keys = set()
+        for row_number in date_rows:
+            existing_row = existing_values[row_number - 1]
+            symbol = str(existing_row[1]).strip() if len(existing_row) > 1 else ""
+            series = str(existing_row[2]).strip() if len(existing_row) > 2 else ""
+            existing_keys.add((symbol, series))
+
+        missing_rows = [
+            row
+            for key, row in incoming.items()
+            if key not in existing_keys
         ]
 
-        if first_row[:13] == old_header:
-
-            print(
-                "Existing RAW_DATA uses the old 13-column "
-                "header. Expanding it to 15 columns."
-            )
-
-            ws.update(
-                "A1:O1",
-                [header],
+        if missing_rows:
+            ws.append_rows(
+                missing_rows,
                 value_input_option="USER_ENTERED"
             )
 
-        elif first_row != header:
-
-            print(
-                "Warning: existing RAW_DATA header differs "
-                "from the expected header."
-            )
-
-            print(
-                "Existing header:",
-                first_row
-            )
-
-            print(
-                "Expected header:",
-                header
-            )
-
-            raise RuntimeError(
-                "RAW_DATA header does not match the expected "
-                "structure. No rows were appended."
-            )
+        print(
+            f"Updated {updated} existing rows for {source_date}; "
+            f"appended {len(missing_rows)} previously missing rows."
+        )
+        return
 
     # -----------------------------------------------------------------------
-    # APPEND DATA
+    # New trade date: append normally.
     # -----------------------------------------------------------------------
 
     ws.append_rows(
@@ -807,13 +902,20 @@ def main() -> int:
 
         return 0
 
+    # The downloaded copy may be older than the requested date when the
+    # requested day's NSE file is not yet available.
+    actual_trade_date = raw_df.attrs.get(
+        "trade_date",
+        trade_date
+    )
+
     # ---------------------------------------------------------------
     # Clean
     # ---------------------------------------------------------------
 
     df = clean_bhavcopy(
         raw_df,
-        trade_date
+        actual_trade_date
     )
 
     if df.empty:
@@ -847,7 +949,8 @@ def main() -> int:
     print("=" * 60)
     print("NSE BHAVCOPY + DELIVERY COMPLETED")
     print("=" * 60)
-    print(f"Trade date       : {trade_date}")
+    print(f"Requested date   : {trade_date}")
+    print(f"Downloaded date  : {actual_trade_date}")
     print(f"Rows written     : {len(df)}")
     print(
         "Delivery Qty     :",
