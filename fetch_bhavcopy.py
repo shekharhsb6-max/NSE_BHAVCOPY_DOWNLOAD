@@ -318,9 +318,21 @@ def clean_bhavcopy(
         ],
     )
 
+    # nselib bhav_copy_with_delivery() returns these columns in the
+    # current format:
+    #   TTL_TRD_QNTY   = total traded quantity
+    #   TURNOVER_LACS  = turnover in lakh rupees
+    #   NO_OF_TRADES   = number of trades
+    #   DELIV_QTY      = actual deliverable quantity
+    #   DELIV_PER      = delivery percentage
+    #
+    # Keep the older aliases too, so the script remains compatible if
+    # nselib/NSE changes the spelling in a future release.
+
     traded_qty_col = find_column(
         df,
         [
+            "TTL_TRD_QNTY",
             "TOTTRDQTY",
             "TotalTradedQuantity",
             "Total Traded Quantity",
@@ -332,6 +344,7 @@ def clean_bhavcopy(
     traded_value_col = find_column(
         df,
         [
+            "TURNOVER_LACS",
             "TOTTRDVAL",
             "TurnoverInRs",
             "Turnover",
@@ -343,6 +356,7 @@ def clean_bhavcopy(
     trades_col = find_column(
         df,
         [
+            "NO_OF_TRADES",
             "TOTALTRADES",
             "No.ofTrades",
             "No. of Trades",
@@ -351,6 +365,9 @@ def clean_bhavcopy(
         ],
     )
 
+    # The nselib delivery output shown in the successful test does not
+    # contain ISIN. ISIN is therefore optional. If it is absent, leave it
+    # blank rather than failing the whole download.
     isin_col = find_column(
         df,
         [
@@ -358,10 +375,11 @@ def clean_bhavcopy(
         ],
     )
 
-    # Delivery quantity -- include several possible NSE/nselib spellings.
+    # Actual NSE/nselib delivery quantity.
     delivery_qty_col = find_column(
         df,
         [
+            "DELIV_QTY",
             "DeliverableQty",
             "Deliverable Qty",
             "Deliverable Quantity",
@@ -375,10 +393,11 @@ def clean_bhavcopy(
         ],
     )
 
-    # Delivery percentage -- use NSE's field if supplied.
+    # Actual NSE/nselib delivery percentage.
     delivery_pct_col = find_column(
         df,
         [
+            "DELIV_PER",
             "% Dly Qt to Traded Qty",
             "%DlyQttoTradedQty",
             "Percent Dly Qt to Traded Qty",
@@ -414,7 +433,6 @@ def clean_bhavcopy(
         "TOTAL_TRADED_QTY": traded_qty_col,
         "TOTAL_TRADED_VALUE": traded_value_col,
         "TOTAL_TRADES": trades_col,
-        "ISIN": isin_col,
         "DELIVERY_QTY": delivery_qty_col,
     }
 
@@ -448,9 +466,26 @@ def clean_bhavcopy(
     out["LAST"] = df[last_col]
     out["PREV_CLOSE"] = df[prev_close_col]
     out["TOTAL_TRADED_QTY"] = df[traded_qty_col]
-    out["TOTAL_TRADED_VALUE"] = df[traded_value_col]
+
+    # nselib's TURNOVER_LACS is expressed in lakh rupees.
+    # RAW_DATA.TOTAL_TRADED_VALUE is kept in rupees, matching the existing
+    # RAW_DATA convention. Therefore convert lakhs -> rupees when the
+    # source column is TURNOVER_LACS.
+    traded_value = pd.to_numeric(
+        df[traded_value_col],
+        errors="coerce",
+    )
+
+    if _normalize_column_name(traded_value_col) == "TURNOVERLACS":
+        traded_value = traded_value * 100000
+
+    out["TOTAL_TRADED_VALUE"] = traded_value
     out["TOTAL_TRADES"] = df[trades_col]
-    out["ISIN"] = df[isin_col]
+
+    if isin_col is not None:
+        out["ISIN"] = df[isin_col]
+    else:
+        out["ISIN"] = ""
 
     # N = DELIVERY_QTY
     out["DELIVERY_QTY"] = df[delivery_qty_col]
