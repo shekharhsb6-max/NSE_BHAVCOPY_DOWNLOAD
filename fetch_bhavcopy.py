@@ -513,7 +513,12 @@ def clean_bhavcopy(
 
         return value
 
-    out = out.applymap(json_safe)
+    # pandas 2.x removed DataFrame.applymap(). Use DataFrame.map()
+    # when available, with a fallback for older pandas versions.
+    if hasattr(out, "map"):
+        out = out.map(json_safe)
+    else:
+        out = out.apply(lambda column: column.map(json_safe))
 
     # Final safety check: TRADE_DATE must never be blank/NaN.
     out["TRADE_DATE"] = trade_date_text
@@ -742,12 +747,30 @@ def write_date_batch(
 
     # Convert the dataframe to ordinary Python lists and make absolutely
     # sure no NaN/NaT survives into the Google Sheets JSON payload.
-    rows = [
-        [None if (value is None or (isinstance(value, float) and pd.isna(value)))
-         else (value.item() if hasattr(value, "item") else value)
-         for value in row]
-        for row in df.astype(object).values.tolist()
-    ]
+    rows = []
+    for row in df.astype(object).values.tolist():
+        safe_row = []
+        for value in row:
+            if value is None:
+                safe_row.append(None)
+                continue
+
+            try:
+                if pd.isna(value):
+                    safe_row.append(None)
+                    continue
+            except (TypeError, ValueError):
+                pass
+
+            if hasattr(value, "item"):
+                try:
+                    value = value.item()
+                except (ValueError, TypeError):
+                    pass
+
+            safe_row.append(value)
+
+        rows.append(safe_row)
 
     # Hard validation before making the API request.
     for row_index, row in enumerate(rows, start=1):
