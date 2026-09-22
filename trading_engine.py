@@ -309,7 +309,7 @@ def append_trade(sheet, trade):
 # INITIAL EQUITY STATE
 # ============================================================
 
-def initialize_state(config):
+def initialize_state(config, state_sheet):
 
     total_capital = number(
         config.get("TOTAL_CAPITAL")
@@ -329,13 +329,49 @@ def initialize_state(config):
         total_capital * equity_pct / 100
     )
 
+    # --------------------------------------------------------
+    # Recover previously saved equity cash.
+    # If no valid previous state exists, initialize the
+    # equity bucket with its configured target.
+    # --------------------------------------------------------
+
+    previous_values = state_sheet.get_all_values()
+
+    if len(previous_values) >= 2:
+
+        headers = previous_values[0]
+        values = previous_values[1]
+
+        if "EQUITY_AVAILABLE" in headers:
+
+            equity_index = headers.index(
+                "EQUITY_AVAILABLE"
+            )
+
+            if len(values) > equity_index:
+
+                previous_cash = number(
+                    values[equity_index],
+                    -1,
+                )
+
+                if previous_cash >= 0:
+
+                    return {
+                        "TOTAL_CAPITAL": total_capital,
+                        "EQUITY_TARGET": equity_target,
+                        "EQUITY_AVAILABLE": previous_cash,
+                    }
+
+    # --------------------------------------------------------
+    # First run / no valid previous state.
+    # --------------------------------------------------------
+
     return {
         "TOTAL_CAPITAL": total_capital,
         "EQUITY_TARGET": equity_target,
         "EQUITY_AVAILABLE": equity_target,
     }
-
-
 # ============================================================
 # MAIN TRADING ENGINE
 # ============================================================
