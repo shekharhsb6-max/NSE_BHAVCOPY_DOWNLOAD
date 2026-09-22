@@ -1001,12 +1001,12 @@ def main() -> int:
         os.environ.get("GOOGLE_SPREADSHEET_ID", "").strip()
         or DEFAULT_SPREADSHEET_ID
     )
-    sheet_name = (
+        sheet_name = (
         os.environ.get("SHEET_NAME", "").strip()
         or DEFAULT_SHEET_NAME
     )
 
-     if mode == "BACKFILL":
+    if mode == "BACKFILL":
         run_historical_backfill(
             requested_date=requested_date,
             spreadsheet_id=spreadsheet_id,
@@ -1016,10 +1016,6 @@ def main() -> int:
 
     if mode != "DAILY":
         raise RuntimeError("MODE must be DAILY or BACKFILL.")
-
-    if mode != "DAILY":
-        raise RuntimeError("MODE must be DAILY or BACKFILL.")
-
     print("=" * 70)
     print("NSE BHAVCOPY + DELIVERY")
     print("=" * 70)
