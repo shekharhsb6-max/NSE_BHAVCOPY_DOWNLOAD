@@ -828,66 +828,15 @@ def main():
                             existing = p
                             break
 
-                    if existing is not None:
+                                       if existing is not None:
 
-                        old_quantity = (
-                            existing["QUANTITY"]
+                        print(
+                            f"Skipping {symbol}: "
+                            "already held and not eligible "
+                            "for averaging."
                         )
 
-                        old_avg = (
-                            existing["AVG_COST"]
-                        )
-
-                        old_invested = (
-                            old_quantity
-                            * old_avg
-                        )
-
-                        new_quantity = (
-                            old_quantity
-                            + quantity
-                        )
-
-                        new_invested = (
-                            old_invested
-                            + gross_value
-                        )
-
-                        new_avg = (
-                            new_invested
-                            / new_quantity
-                        )
-
-                        existing["QUANTITY"] = (
-                            new_quantity
-                        )
-
-                        existing["AVG_COST"] = (
-                            new_avg
-                        )
-
-                        existing["INVESTED_VALUE"] = (
-                            new_invested
-                        )
-
-                        existing["AVERAGING_BUYS"] += 1
-
-                        existing["LAST_BUY_DATE"] = (
-                            trade_date
-                        )
-
-                        existing["TARGET_PRICE"] = (
-                            new_avg
-                            * (1 + target_profit / 100)
-                        )
-
-                        action = "AVERAGE"
-
-                        avg_before = old_avg
-                        avg_after = new_avg
-                        averaging_count = (
-                            existing["AVERAGING_BUYS"]
-                        )
+                        buy_done = True
 
                     else:
 
@@ -923,35 +872,105 @@ def main():
                         avg_after = price
                         averaging_count = 0
 
-                    cash -= gross_value
+                        cash -= gross_value
 
-                    append_trade(
-                        ledger_sheet,
-                        {
-                            "TRADE_DATE": trade_date,
-                            "ACTION": action,
+                        append_trade(
+                            ledger_sheet,
+                            {
+                                "TRADE_DATE": trade_date,
+                                "ACTION": action,
+                                "SYMBOL": symbol,
+                                "CATEGORY": candidate.get(
+                                    "CATEGORY",
+                                    "",
+                                ),
+                                "QUANTITY": quantity,
+                                "PRICE": price,
+                                "GROSS_VALUE": gross_value,
+                                "AVG_COST_BEFORE": avg_before,
+                                "AVG_COST_AFTER": avg_after,
+                                "AVERAGING_BUYS": averaging_count,
+                                "REALIZED_PNL": 0,
+                                "CASH_BEFORE": cash_before,
+                                "CASH_AFTER": cash,
+                                "REASON": "FINAL_RANK_1",
+                                "SIGNAL_RANK": candidate.get(
+                                    "FINAL_RANK",
+                                    1,
+                                ),
+                            },
+                        )                    if existing is not None:
+
+                        print(
+                            f"Skipping {symbol}: "
+                            "already held and not eligible "
+                            "for averaging."
+                        )
+
+                        buy_done = True
+
+                    else:
+
+                        new_position = {
                             "SYMBOL": symbol,
                             "CATEGORY": candidate.get(
                                 "CATEGORY",
                                 "",
                             ),
                             "QUANTITY": quantity,
-                            "PRICE": price,
-                            "GROSS_VALUE": gross_value,
-                            "AVG_COST_BEFORE": avg_before,
-                            "AVG_COST_AFTER": avg_after,
-                            "AVERAGING_BUYS": averaging_count,
-                            "REALIZED_PNL": 0,
-                            "CASH_BEFORE": cash_before,
-                            "CASH_AFTER": cash,
-                            "REASON": "FINAL_RANK_1",
-                            "SIGNAL_RANK": candidate.get(
-                                "FINAL_RANK",
-                                1,
+                            "AVG_COST": price,
+                            "INVESTED_VALUE": gross_value,
+                            "CURRENT_PRICE": price,
+                            "CURRENT_VALUE": gross_value,
+                            "UNREALIZED_PNL": 0,
+                            "UNREALIZED_PNL_PCT": 0,
+                            "AVERAGING_BUYS": 0,
+                            "LAST_BUY_DATE": trade_date,
+                            "TARGET_PRICE": (
+                                price
+                                * (1 + target_profit / 100)
                             ),
-                        },
-                    )
+                            "STATUS": "OPEN",
+                        }
 
+                        positions.append(
+                            new_position
+                        )
+
+                        action = "BUY"
+
+                        avg_before = 0
+                        avg_after = price
+                        averaging_count = 0
+
+                        cash -= gross_value
+
+                        append_trade(
+                            ledger_sheet,
+                            {
+                                "TRADE_DATE": trade_date,
+                                "ACTION": action,
+                                "SYMBOL": symbol,
+                                "CATEGORY": candidate.get(
+                                    "CATEGORY",
+                                    "",
+                                ),
+                                "QUANTITY": quantity,
+                                "PRICE": price,
+                                "GROSS_VALUE": gross_value,
+                                "AVG_COST_BEFORE": avg_before,
+                                "AVG_COST_AFTER": avg_after,
+                                "AVERAGING_BUYS": averaging_count,
+                                "REALIZED_PNL": 0,
+                                "CASH_BEFORE": cash_before,
+                                "CASH_AFTER": cash,
+                                "REASON": "FINAL_RANK_1",
+                                "SIGNAL_RANK": candidate.get(
+                                    "FINAL_RANK",
+                                    1,
+                                ),
+                            },
+                        )
     # --------------------------------------------------------
     # 6. RECALCULATE POSITIONS
     # --------------------------------------------------------
