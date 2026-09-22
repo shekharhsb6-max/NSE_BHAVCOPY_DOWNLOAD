@@ -397,7 +397,8 @@ def main():
     positions = read_positions(
         positions_sheet
     )
-        if DRY_RUN and TEST_AVERAGING:
+
+    if DRY_RUN and TEST_AVERAGING:
         positions.append({
             "SYMBOL": "MAHKTECH",
             "CATEGORY": "TEST",
@@ -418,11 +419,6 @@ def main():
             "TEST MODE: Simulated MAHKTECH "
             "position for averaging test."
         )
-                if DRY_RUN and TEST_AVERAGING:
-        latest_prices["MAHKTECH"] = {
-            "DATE": trade_date,
-            "CLOSE": 20.50,
-        }
 
     scanner = read_scanner(
         scanner_sheet
@@ -444,11 +440,13 @@ def main():
         for row in scanner
         if row.get("TRADE_DATE")
     )
+
     if DRY_RUN and TEST_AVERAGING:
         latest_prices["MAHKTECH"] = {
             "DATE": trade_date,
             "CLOSE": 20.50,
         }
+
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
     # --------------------------------------------------------
