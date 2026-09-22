@@ -1012,14 +1012,14 @@ def main():
     ]
 
     if DRY_RUN:
-    print("DRY RUN: PORTFOLIO_STATE sheet will NOT be modified.")
-else:
-    state_sheet.clear()
+        print("DRY RUN: PORTFOLIO_STATE sheet will NOT be modified.")
+    else:
+        state_sheet.clear()
 
-    state_sheet.update(
-        "A1:L2",
-        state_rows,
-    )
+        state_sheet.update(
+            "A1:L2",
+            state_rows,
+        )
 
     print("======================================")
     print("TRADING ENGINE COMPLETED")
