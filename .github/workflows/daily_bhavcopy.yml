@@ -1,35 +1,8 @@
-name: Daily NSE Bhavcopy → Google Sheet
-
-on:
-  schedule:
-    - cron: "30 13 * * 1-5"
-
-  workflow_dispatch:
-    inputs:
-      bhavcopy_date:
-        description: "Bhavcopy date (2026-09-18), e.g. 2026-09-18"
-        required: false
-        default: ""
-
-jobs:
-  fetch:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Run fetch script
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
-          SHEET_NAME: RAW_DATA
-          BHAVCOPY_MODE: overwrite
-          BHAVCOPY_DATE: ${{ inputs.bhavcopy_date }}
-        run: python fetch_bhavcopy.py
+- name: Run NSE historical backfill
+  run: python fetch_bhavcopy.py
+  env:
+    MODE: BACKFILL
+    BACKFILL_TRADING_DAYS: 5
+    BACKFILL_MAX_CALENDAR_DAYS: 15
+    GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+    GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
