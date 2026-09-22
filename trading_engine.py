@@ -408,7 +408,11 @@ def main():
 
     cash = state["EQUITY_AVAILABLE"]
 
-      trade_date = scanner[-1]["TRADE_DATE"]
+      trade_date = max(
+        row["TRADE_DATE"]
+        for row in scanner
+        if row.get("TRADE_DATE")
+    )
 
     # --------------------------------------------------------
        # UPDATE CURRENT PRICES
