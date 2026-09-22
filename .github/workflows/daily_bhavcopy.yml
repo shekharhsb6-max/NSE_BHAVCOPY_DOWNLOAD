@@ -1,4 +1,4 @@
-name: NSE Historical Backfill Test
+name: NSE Historical Backfill
 
 on:
   workflow_dispatch:
@@ -19,11 +19,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run NSE historical backfill
+      - name: Run NSE 252-Day ETF Historical Backfill
         run: python fetch_bhavcopy.py
         env:
           MODE: BACKFILL
-          BACKFILL_TRADING_DAYS: "5"
-          BACKFILL_MAX_CALENDAR_DAYS: "15"
+          BACKFILL_TRADING_DAYS: "252"
+          BACKFILL_MAX_CALENDAR_DAYS: "450"
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
