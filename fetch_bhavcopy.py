@@ -41,6 +41,21 @@ RAW_HEADERS = [
     "DELIVERY_PCT",
 ]
 
+# Historical ETF-only storage. This prevents a 252-session backfill of the
+# entire NSE universe from exceeding Google Sheets' cell limit.
+DEFAULT_ETF_HISTORY_SHEET_NAME = "ETF_HISTORY"
+ETF_HISTORY_HEADERS = [
+    "TRADE_DATE",
+    "SYMBOL",
+    "CATEGORY",
+    "HIGH",
+    "CLOSE",
+    "TOTAL_TRADED_QTY",
+    "TOTAL_TRADED_VALUE",
+    "DELIVERY_QTY",
+    "DELIVERY_PCT",
+]
+
 
 # ============================================================================
 # DATE
@@ -903,6 +918,344 @@ def write_date_batch(
 
 
 # ============================================================================
+# ETF HISTORY
+# ============================================================================
+
+def get_etf_category_map(spreadsheet_id: str) -> dict[str, str]:
+    """Read Symbol -> Category from the user's existing Category_Map sheet."""
+    _, worksheet = get_worksheet(spreadsheet_id, "Category_Map")
+    values = worksheet.get_all_values()
+
+    if not values:
+        raise RuntimeError(
+            'Category_Map is empty. It must contain the ETF symbol/category mapping.'
+        )
+
+    headers = [str(x).strip().upper() for x in values[0]]
+    try:
+        symbol_col = headers.index("SYMBOL")
+    except ValueError:
+        symbol_col = 0
+
+    try:
+        category_col = headers.index("CATEGORY")
+    except ValueError:
+        category_col = 1
+
+    mapping = {}
+
+    for row in values[1:]:
+        if len(row) <= max(symbol_col, category_col):
+            continue
+
+        symbol = str(row[symbol_col]).strip().upper()
+        category = str(row[category_col]).strip()
+
+        if symbol and category:
+            mapping[symbol] = category
+
+    if not mapping:
+        raise RuntimeError(
+            "No usable ETF symbol/category mappings were found in Category_Map."
+        )
+
+    print(f"Loaded {len(mapping)} ETF symbols from Category_Map.")
+    return mapping
+
+
+def ensure_etf_history_header(worksheet) -> None:
+    current = worksheet.row_values(1)
+
+    if not current:
+        worksheet.update(
+            range_name="A1:I1",
+            values=[ETF_HISTORY_HEADERS],
+            value_input_option="USER_ENTERED",
+        )
+        return
+
+    if current[:9] == ETF_HISTORY_HEADERS:
+        return
+
+    raise RuntimeError(
+        "ETF_HISTORY header does not match the expected structure.\n"
+        f"Expected: {ETF_HISTORY_HEADERS}\n"
+        f"Found: {current}"
+    )
+
+
+def prepare_etf_history_batch(
+    df: pd.DataFrame,
+    category_map: dict[str, str],
+) -> pd.DataFrame:
+    """Filter cleaned NSE data to mapped ETFs and keep only scanner fields."""
+
+    work = df.copy()
+
+    work["SYMBOL"] = work["SYMBOL"].astype(str).str.strip().str.upper()
+
+    work = work[work["SYMBOL"].isin(category_map.keys())].copy()
+
+    if work.empty:
+        return pd.DataFrame(columns=ETF_HISTORY_HEADERS)
+
+    work["CATEGORY"] = work["SYMBOL"].map(category_map)
+
+    # Keep only the historical fields required by the scanner/backtest.
+    out = work[
+        [
+            "TRADE_DATE",
+            "SYMBOL",
+            "CATEGORY",
+            "HIGH",
+            "CLOSE",
+            "TOTAL_TRADED_QTY",
+            "TOTAL_TRADED_VALUE",
+            "DELIVERY_QTY",
+            "DELIVERY_PCT",
+        ]
+    ].copy()
+
+    # Keep deterministic ordering.
+    out = out.sort_values(["SYMBOL"]).reset_index(drop=True)
+
+    return out
+
+
+def _safe_sheet_rows(df: pd.DataFrame) -> list[list]:
+    """Convert a dataframe to JSON-safe Google Sheets rows."""
+    rows = []
+
+    for row in df.astype(object).values.tolist():
+        safe_row = []
+
+        for value in row:
+            if value is None:
+                safe_row.append(None)
+                continue
+
+            try:
+                missing = pd.isna(value)
+            except (TypeError, ValueError):
+                missing = False
+
+            if isinstance(missing, bool) and missing:
+                safe_row.append(None)
+                continue
+
+            if hasattr(value, "item"):
+                try:
+                    value = value.item()
+                except (ValueError, TypeError):
+                    pass
+
+            safe_row.append(value)
+
+        rows.append(safe_row)
+
+    return rows
+
+
+def write_etf_history_date_batch(
+    spreadsheet,
+    worksheet,
+    df: pd.DataFrame,
+) -> None:
+    """Replace one ETF_HISTORY date or append it if it is new."""
+
+    if df.empty:
+        print("No ETF rows to write.")
+        return
+
+    source_date = str(df["TRADE_DATE"].iloc[0])
+    rows = _safe_sheet_rows(df)
+
+    values = worksheet.get_all_values()
+
+    if not values:
+        ensure_etf_history_header(worksheet)
+        values = worksheet.get_all_values()
+
+    matching_rows = []
+
+    for row_number, row in enumerate(values[1:], start=2):
+        if row and str(row[0]).strip() == source_date:
+            matching_rows.append(row_number)
+
+    if matching_rows:
+        first_row = min(matching_rows)
+        start_index = first_row - 1
+        end_index = start_index + len(matching_rows)
+        sheet_id = worksheet.id
+
+        spreadsheet.batch_update(
+            {
+                "requests": [
+                    {
+                        "deleteDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": start_index,
+                                "endIndex": end_index,
+                            }
+                        }
+                    },
+                    {
+                        "insertDimension": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "dimension": "ROWS",
+                                "startIndex": start_index,
+                                "endIndex": start_index + len(rows),
+                            },
+                            "inheritFromBefore": False,
+                        }
+                    },
+                ]
+            }
+        )
+
+        worksheet.update(
+            range_name=f"A{first_row}:I{first_row + len(rows) - 1}",
+            values=rows,
+            value_input_option="USER_ENTERED",
+        )
+
+        print(
+            f"ETF_HISTORY: replaced {source_date} "
+            f"with {len(rows)} ETF rows."
+        )
+        return
+
+    next_row = len(values) + 1
+
+    worksheet.update(
+        range_name=f"A{next_row}:I{next_row + len(rows) - 1}",
+        values=rows,
+        value_input_option="USER_ENTERED",
+    )
+
+    print(
+        f"ETF_HISTORY: appended {len(rows)} ETF rows "
+        f"for {source_date}."
+    )
+
+
+def run_etf_history_backfill(
+    requested_date: date,
+    spreadsheet_id: str,
+) -> int:
+    """
+    Backfill only ETFs listed in Category_Map.
+
+    RAW_DATA is deliberately NOT written during this historical operation.
+    The complete NSE daily file is still downloaded and cleaned, but only
+    mapped ETF rows are retained in ETF_HISTORY.
+    """
+    try:
+        sessions_needed = int(
+            os.environ.get(
+                "BACKFILL_TRADING_DAYS",
+                str(DEFAULT_BACKFILL_TRADING_DAYS),
+            )
+        )
+    except ValueError:
+        sessions_needed = DEFAULT_BACKFILL_TRADING_DAYS
+
+    try:
+        calendar_limit = int(
+            os.environ.get(
+                "BACKFILL_MAX_CALENDAR_DAYS",
+                str(DEFAULT_BACKFILL_MAX_CALENDAR_DAYS),
+            )
+        )
+    except ValueError:
+        calendar_limit = DEFAULT_BACKFILL_MAX_CALENDAR_DAYS
+
+    sessions_needed = max(1, sessions_needed)
+    calendar_limit = max(sessions_needed, calendar_limit)
+
+    print("=" * 70)
+    print("ETF-ONLY HISTORICAL BACKFILL")
+    print("=" * 70)
+    print(f"End date requested : {requested_date}")
+    print(f"Sessions requested : {sessions_needed}")
+    print(f"Calendar-day limit : {calendar_limit}")
+    print(f"Destination sheet  : {DEFAULT_ETF_HISTORY_SHEET_NAME}")
+
+    category_map = get_etf_category_map(spreadsheet_id)
+    spreadsheet, worksheet = get_worksheet(
+        spreadsheet_id,
+        DEFAULT_ETF_HISTORY_SHEET_NAME,
+    )
+    ensure_etf_history_header(worksheet)
+
+    loaded = 0
+    checked = 0
+    candidate = requested_date
+
+    while loaded < sessions_needed and checked <= calendar_limit:
+        if candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        print(f"Trying {candidate} ...")
+
+        raw_df = download_bhavcopy_for_date(candidate)
+
+        if raw_df is None:
+            print(f"No usable bhavcopy for {candidate}.")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        actual_trade_date = raw_df.attrs.get("trade_date", candidate)
+        df = clean_bhavcopy(raw_df, actual_trade_date)
+
+        etf_df = prepare_etf_history_batch(df, category_map)
+
+        if not etf_df.empty:
+            write_etf_history_date_batch(
+                spreadsheet,
+                worksheet,
+                etf_df,
+            )
+
+            loaded += 1
+
+            print(
+                f"Loaded {actual_trade_date}: "
+                f"{len(etf_df)} ETF rows."
+            )
+        else:
+            print(
+                f"No Category_Map ETF rows found for "
+                f"{actual_trade_date}."
+            )
+
+        candidate -= timedelta(days=1)
+        checked += 1
+
+    print("=" * 70)
+    print(
+        f"ETF HISTORY BACKFILL COMPLETE: "
+        f"{loaded} trading sessions loaded."
+    )
+    print("=" * 70)
+
+    if loaded < sessions_needed:
+        raise RuntimeError(
+            f"Only {loaded} sessions were loaded; "
+            f"{sessions_needed} requested. Increase "
+            "BACKFILL_MAX_CALENDAR_DAYS if required."
+        )
+
+    return loaded
+
+
+# ============================================================================
 # HISTORICAL BACKFILL
 # ============================================================================
 
@@ -911,7 +1264,7 @@ def run_historical_backfill(
     spreadsheet_id: str,
     sheet_name: str,
 ) -> int:
-    """Load historical NSE sessions into RAW_DATA without clearing history."""
+    """Legacy full-NSE backfill retained for controlled/manual use only."""
     try:
         sessions_needed = int(os.environ.get(
             "BACKFILL_TRADING_DAYS",
@@ -1008,10 +1361,9 @@ def main() -> int:
     )
 
     if mode == "BACKFILL":
-        run_historical_backfill(
+        run_etf_history_backfill(
             requested_date=requested_date,
             spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
         )
         return 0
 
