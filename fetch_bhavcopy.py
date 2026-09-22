@@ -1,25 +1,3 @@
-"""
-fetch_bhavcopy.py
-=================
-
-NSE CM Bhavcopy + Delivery -> Google Sheets RAW_DATA
-
-What this version does:
-1. Searches backward for the latest available NSE bhavcopy-with-delivery.
-2. Handles the current nselib column names:
-       TTL_TRD_QNTY
-       TURNOVER_LACS
-       NO_OF_TRADES
-       DELIV_QTY
-       DELIV_PER
-3. Writes the result to RAW_DATA columns A:O.
-4. If the downloaded trade date already exists, it replaces that date's
-   rows in one batch operation instead of updating thousands of rows
-   individually.
-5. If the date does not exist, it appends the complete batch.
-6. Uses Google Sheets batch_update rather than many individual update calls.
-"""
-
 from __future__ import annotations
 
 import json
@@ -41,6 +19,8 @@ DEFAULT_SPREADSHEET_ID = (
 
 DEFAULT_SHEET_NAME = "RAW_DATA"
 DEFAULT_MAX_LOOKBACK_DAYS = 10
+DEFAULT_BACKFILL_TRADING_DAYS = 252
+DEFAULT_BACKFILL_MAX_CALENDAR_DAYS = 450
 IST = ZoneInfo("Asia/Kolkata")
 
 RAW_HEADERS = [
@@ -110,6 +90,35 @@ def find_column(
 # ============================================================================
 # NSE DOWNLOAD
 # ============================================================================
+
+def download_bhavcopy_for_date(trade_date: date) -> pd.DataFrame | None:
+    """Download bhavcopy-with-delivery for exactly one NSE date."""
+    from nselib import capital_market
+
+    nse_date = trade_date.strftime("%d-%m-%Y")
+
+    try:
+        df = capital_market.bhav_copy_with_delivery(trade_date=nse_date)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        message = str(exc).lower()
+        retryable = (
+            "404", "not found", "file not found", "no data",
+            "no bhav", "unable to download", "failed to download"
+        )
+        if any(term in message for term in retryable):
+            return None
+        raise RuntimeError(
+            f"NSE download failed for {trade_date}: {exc}"
+        ) from exc
+
+    if df is None or df.empty:
+        return None
+
+    df.attrs["trade_date"] = trade_date
+    return df
+
 
 def download_latest_bhavcopy(
     requested_date: date,
@@ -894,12 +903,118 @@ def write_date_batch(
 
 
 # ============================================================================
+# HISTORICAL BACKFILL
+# ============================================================================
+
+def run_historical_backfill(
+    requested_date: date,
+    spreadsheet_id: str,
+    sheet_name: str,
+) -> int:
+    """Load historical NSE sessions into RAW_DATA without clearing history."""
+    try:
+        sessions_needed = int(os.environ.get(
+            "BACKFILL_TRADING_DAYS",
+            str(DEFAULT_BACKFILL_TRADING_DAYS)
+        ))
+    except ValueError:
+        sessions_needed = DEFAULT_BACKFILL_TRADING_DAYS
+
+    try:
+        calendar_limit = int(os.environ.get(
+            "BACKFILL_MAX_CALENDAR_DAYS",
+            str(DEFAULT_BACKFILL_MAX_CALENDAR_DAYS)
+        ))
+    except ValueError:
+        calendar_limit = DEFAULT_BACKFILL_MAX_CALENDAR_DAYS
+
+    sessions_needed = max(1, sessions_needed)
+    calendar_limit = max(sessions_needed, calendar_limit)
+
+    print("=" * 70)
+    print("NSE HISTORICAL BACKFILL")
+    print("=" * 70)
+    print(f"End date requested : {requested_date}")
+    print(f"Sessions requested : {sessions_needed}")
+    print(f"Calendar-day limit : {calendar_limit}")
+
+    spreadsheet, worksheet = get_worksheet(spreadsheet_id, sheet_name)
+    ensure_header(worksheet)
+
+    loaded = 0
+    checked = 0
+    candidate = requested_date
+
+    while loaded < sessions_needed and checked <= calendar_limit:
+        if candidate.weekday() >= 5:
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        print(f"Trying {candidate} ...")
+        raw_df = download_bhavcopy_for_date(candidate)
+
+        if raw_df is None:
+            print(f"No usable bhavcopy for {candidate}.")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        actual_trade_date = raw_df.attrs.get("trade_date", candidate)
+        df = clean_bhavcopy(raw_df, actual_trade_date)
+
+        if not df.empty:
+            # write_date_batch() safely replaces an existing date or appends
+            # a new date. Therefore rerunning the backfill is safe.
+            write_date_batch(spreadsheet, worksheet, df)
+            loaded += 1
+            print(f"Loaded {actual_trade_date}: {len(df)} rows.")
+
+        candidate -= timedelta(days=1)
+        checked += 1
+
+    print("=" * 70)
+    print(f"BACKFILL COMPLETE: {loaded} trading sessions loaded.")
+    print("=" * 70)
+
+    if loaded < sessions_needed:
+        raise RuntimeError(
+            f"Only {loaded} sessions were loaded; "
+            f"{sessions_needed} requested. Increase "
+            "BACKFILL_MAX_CALENDAR_DAYS if required."
+        )
+
+    return loaded
+
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
 def main() -> int:
 
     requested_date = get_requested_date()
+
+    mode = os.environ.get("MODE", "DAILY").strip().upper()
+
+    spreadsheet_id = (
+        os.environ.get("GOOGLE_SPREADSHEET_ID", "").strip()
+        or DEFAULT_SPREADSHEET_ID
+    )
+    sheet_name = (
+        os.environ.get("SHEET_NAME", "").strip()
+        or DEFAULT_SHEET_NAME
+    )
+
+    if mode == "BACKFILL":
+        return run_historical_backfill(
+            requested_date=requested_date,
+            spreadsheet_id=spreadsheet_id,
+            sheet_name=sheet_name,
+        )
+
+    if mode != "DAILY":
+        raise RuntimeError("MODE must be DAILY or BACKFILL.")
 
     print("=" * 70)
     print("NSE BHAVCOPY + DELIVERY")
@@ -956,26 +1071,7 @@ def main() -> int:
     # Google Sheets configuration.
     # ------------------------------------------------------------------------
 
-    # Fixed Google Spreadsheet ID
-    # This is the spreadsheet used by the ETF scanner.
-    spreadsheet_id = "1D3E5lyH2QUq55AzsJqSbJj2tNkmOQht_8xUmt0mdvbk"
-
-    # Keep RAW_DATA as the target worksheet unless explicitly changed.
-    sheet_name = (
-        os.environ.get("SHEET_NAME", "").strip()
-        or DEFAULT_SHEET_NAME
-    )
-
-    print(
-        f"Target spreadsheet ID: {spreadsheet_id}"
-    )
-
-    if not spreadsheet_id:
-        raise RuntimeError("Spreadsheet ID is empty.")
-
-    print(
-        f"Target worksheet     : {sheet_name}"
-    )
+    # Spreadsheet ID and worksheet name were resolved at the start of main().
 
     # ------------------------------------------------------------------------
     # Connect.
