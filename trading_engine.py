@@ -401,7 +401,10 @@ def main():
         history_sheet
     )
 
-    state = initialize_state(config)
+    state = initialize_state(
+    config,
+    state_sheet,
+)
 
     cash = state["EQUITY_AVAILABLE"]
 
