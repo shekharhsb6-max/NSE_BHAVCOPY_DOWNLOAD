@@ -6,6 +6,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+
 TEST_EXISTING_RANK1 = (
     os.environ.get("TEST_EXISTING_RANK1", "false").lower()
     == "true"
@@ -396,7 +397,8 @@ def main():
     positions = read_positions(
         positions_sheet
     )
-        if DRY_RUN and TEST_EXISTING_RANK1:
+
+    if DRY_RUN and TEST_EXISTING_RANK1:
         positions.append({
             "SYMBOL": "MAHKTECH",
             "CATEGORY": "TEST",
