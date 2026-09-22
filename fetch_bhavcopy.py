@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import sys
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1153,9 +1154,15 @@ def run_etf_history_backfill(
     """
     Backfill only ETFs listed in Category_Map.
 
+    This version is deliberately optimized for Google Sheets API quotas:
+      1. Read ETF_HISTORY only once.
+      2. Detect dates already present and do not rewrite them.
+      3. Download missing sessions and keep ETF rows in memory.
+      4. Expand the worksheet only once.
+      5. Write the accumulated history in large chunks instead of making
+         one Google Sheets write per trading day.
+
     RAW_DATA is deliberately NOT written during this historical operation.
-    The complete NSE daily file is still downloaded and cleaned, but only
-    mapped ETF rows are retained in ETF_HISTORY.
     """
     try:
         sessions_needed = int(
@@ -1181,7 +1188,7 @@ def run_etf_history_backfill(
     calendar_limit = max(sessions_needed, calendar_limit)
 
     print("=" * 70)
-    print("ETF-ONLY HISTORICAL BACKFILL")
+    print("ETF-ONLY HISTORICAL BACKFILL — BULK SHEETS MODE")
     print("=" * 70)
     print(f"End date requested : {requested_date}")
     print(f"Sessions requested : {sessions_needed}")
@@ -1195,17 +1202,53 @@ def run_etf_history_backfill(
     )
     ensure_etf_history_header(worksheet)
 
-    loaded = 0
+    # Read the sheet ONCE.  The previous implementation called get_all_values()
+    # for every trading day, followed by add_rows()/update().  That generated
+    # hundreds of Sheets API write requests and caused HTTP 429 quota errors.
+    existing_values = worksheet.get_all_values()
+
+    existing_dates = set()
+    if len(existing_values) > 1:
+        for row in existing_values[1:]:
+            if row and str(row[0]).strip():
+                existing_dates.add(str(row[0]).strip())
+
+    print(f"Existing ETF_HISTORY sessions: {len(existing_dates)}")
+
+    # Do not count the header as a session.  Existing dates already stored in
+    # ETF_HISTORY count toward the requested historical depth.
+    target_new_sessions = max(0, sessions_needed - len(existing_dates))
+
+    if target_new_sessions == 0:
+        print(
+            f"ETF_HISTORY already contains at least {sessions_needed} unique "
+            "trading sessions. No backfill required."
+        )
+        return len(existing_dates)
+
+    pending_batches = []
+    pending_dates = set()
     checked = 0
     candidate = requested_date
 
-    while loaded < sessions_needed and checked <= calendar_limit:
+    while (
+        len(existing_dates) + len(pending_dates) < sessions_needed
+        and checked <= calendar_limit
+    ):
         if candidate.weekday() >= 5:
             candidate -= timedelta(days=1)
             checked += 1
             continue
 
         print(f"Trying {candidate} ...")
+
+        # If this candidate is already stored, skip the download entirely.
+        candidate_key = str(candidate)
+        if candidate_key in existing_dates or candidate_key in pending_dates:
+            print(f"Already present in ETF_HISTORY: {candidate}")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
 
         raw_df = download_bhavcopy_for_date(candidate)
 
@@ -1216,52 +1259,108 @@ def run_etf_history_backfill(
             continue
 
         actual_trade_date = raw_df.attrs.get("trade_date", candidate)
-        df = clean_bhavcopy(raw_df, actual_trade_date)
+        actual_key = str(actual_trade_date)
 
+        # A downloaded file can resolve to a date different from the requested
+        # candidate. Avoid counting/writing the same actual session twice.
+        if actual_key in existing_dates or actual_key in pending_dates:
+            print(f"Already present in ETF_HISTORY: {actual_trade_date}")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        df = clean_bhavcopy(raw_df, actual_trade_date)
         etf_df = prepare_etf_history_batch(df, category_map)
 
         if not etf_df.empty:
-            write_etf_history_date_batch(
-                spreadsheet,
-                worksheet,
-                etf_df,
-            )
-
-            loaded += 1
-
+            rows = _safe_sheet_rows(etf_df)
+            pending_batches.append((actual_key, rows))
+            pending_dates.add(actual_key)
             print(
-                f"Loaded {actual_trade_date}: "
-                f"{len(etf_df)} ETF rows."
+                f"Prepared {actual_trade_date}: "
+                f"{len(rows)} ETF rows for bulk write."
             )
         else:
-            print(
-                f"No Category_Map ETF rows found for "
-                f"{actual_trade_date}."
-            )
+            print(f"No mapped ETF rows for {actual_trade_date}.")
 
         candidate -= timedelta(days=1)
         checked += 1
 
-    print("=" * 70)
-    print(
-        f"ETF HISTORY BACKFILL COMPLETE: "
-        f"{loaded} trading sessions loaded."
-    )
-    print("=" * 70)
+    total_sessions = len(existing_dates) + len(pending_dates)
 
-    if loaded < sessions_needed:
+    if total_sessions < sessions_needed:
         raise RuntimeError(
-            f"Only {loaded} sessions were loaded; "
-            f"{sessions_needed} requested. Increase "
-            "BACKFILL_MAX_CALENDAR_DAYS if required."
+            f"Historical backfill stopped after checking {checked} calendar "
+            f"days: only {total_sessions} unique ETF_HISTORY sessions are "
+            f"available; {sessions_needed} were requested."
         )
 
-    return loaded
+    # The dates were collected newest -> oldest, which is the same ordering
+    # used by the existing history. Append the missing older sessions in that
+    # order, preserving the normal history layout.
+    all_pending_rows = []
+    for trade_date_key, rows in pending_batches:
+        all_pending_rows.extend(rows)
 
+    if not all_pending_rows:
+        print("No new ETF rows need to be written.")
+        return total_sessions
 
-# ============================================================================
-# HISTORICAL BACKFILL
-# ============================================================================
+    next_row = len(existing_values) + 1
+    final_row = next_row + len(all_pending_rows) - 1
+
+    # One worksheet resize instead of one resize per trading day.
+    if final_row > worksheet.row_count:
+        rows_to_add = final_row - worksheet.row_count
+        print(
+            f"ETF_HISTORY grid has {worksheet.row_count} rows; "
+            f"expanding once by {rows_to_add} rows."
+        )
+        worksheet.add_rows(rows_to_add)
+
+    # Large chunks drastically reduce Sheets write-request count.  5,000 rows
+    # x 9 columns = 45,000 cells per request, comfortably below normal API
+    # request-size limits for this dataset.
+    chunk_size = 5000
+    total_rows = len(all_pending_rows)
+
+    print(
+        f"Bulk writing {total_rows} ETF rows in "
+        f"{(total_rows + chunk_size - 1) // chunk_size} chunks..."
+    )
+
+    for offset in range(0, total_rows, chunk_size):
+        chunk = all_pending_rows[offset:offset + chunk_size]
+        start_row = next_row + offset
+        end_row = start_row + len(chunk) - 1
+
+        worksheet.update(
+            range_name=f"A{start_row}:I{end_row}",
+            values=chunk,
+            value_input_option="USER_ENTERED",
+        )
+
+        print(
+            f"ETF_HISTORY bulk write: rows {start_row}-{end_row} "
+            f"({len(chunk)} rows)."
+        )
+
+        # A short pause prevents a burst of write requests from immediately
+        # hitting the per-minute Sheets API quota.
+        if end_row < final_row:
+            time.sleep(1.0)
+
+    print("=" * 70)
+    print(
+        f"ETF BACKFILL COMPLETE: {total_sessions} unique trading sessions "
+        f"available in ETF_HISTORY."
+    )
+    print(f"New sessions written: {len(pending_dates)}")
+    print(f"New ETF rows written: {total_rows}")
+    print("=" * 70)
+
+    return total_sessions
+
 
 def run_historical_backfill(
     requested_date: date,
