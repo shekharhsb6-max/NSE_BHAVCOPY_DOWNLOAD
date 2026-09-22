@@ -170,7 +170,7 @@ def write_positions(sheet, positions):
         return
     sheet.clear()
     sheet.update(
-        f"A1:M{len(rows)}",
+        f"A1:N{len(rows)}",
         rows,
     )
 
@@ -828,7 +828,7 @@ def main():
                             existing = p
                             break
 
-                                       if existing is not None:
+                    if existing is not None:
 
                         print(
                             f"Skipping {symbol}: "
@@ -836,77 +836,9 @@ def main():
                             "for averaging."
                         )
 
-                        buy_done = True
-
-                    else:
-
-                        new_position = {
-                            "SYMBOL": symbol,
-                            "CATEGORY": candidate.get(
-                                "CATEGORY",
-                                "",
-                            ),
-                            "QUANTITY": quantity,
-                            "AVG_COST": price,
-                            "INVESTED_VALUE": gross_value,
-                            "CURRENT_PRICE": price,
-                            "CURRENT_VALUE": gross_value,
-                            "UNREALIZED_PNL": 0,
-                            "UNREALIZED_PNL_PCT": 0,
-                            "AVERAGING_BUYS": 0,
-                            "LAST_BUY_DATE": trade_date,
-                            "TARGET_PRICE": (
-                                price
-                                * (1 + target_profit / 100)
-                            ),
-                            "STATUS": "OPEN",
-                        }
-
-                        positions.append(
-                            new_position
-                        )
-
-                        action = "BUY"
-
-                        avg_before = 0
-                        avg_after = price
-                        averaging_count = 0
-
-                        cash -= gross_value
-
-                        append_trade(
-                            ledger_sheet,
-                            {
-                                "TRADE_DATE": trade_date,
-                                "ACTION": action,
-                                "SYMBOL": symbol,
-                                "CATEGORY": candidate.get(
-                                    "CATEGORY",
-                                    "",
-                                ),
-                                "QUANTITY": quantity,
-                                "PRICE": price,
-                                "GROSS_VALUE": gross_value,
-                                "AVG_COST_BEFORE": avg_before,
-                                "AVG_COST_AFTER": avg_after,
-                                "AVERAGING_BUYS": averaging_count,
-                                "REALIZED_PNL": 0,
-                                "CASH_BEFORE": cash_before,
-                                "CASH_AFTER": cash,
-                                "REASON": "FINAL_RANK_1",
-                                "SIGNAL_RANK": candidate.get(
-                                    "FINAL_RANK",
-                                    1,
-                                ),
-                            },
-                        )                    if existing is not None:
-
-                        print(
-                            f"Skipping {symbol}: "
-                            "already held and not eligible "
-                            "for averaging."
-                        )
-
+                        # Rule A:
+                        # If FINAL_RANK 1 is already held and it has
+                        # not qualified for averaging, do nothing today.
                         buy_done = True
 
                     else:
@@ -971,6 +903,8 @@ def main():
                                 ),
                             },
                         )
+
+                        buy_done = True
     # --------------------------------------------------------
     # 6. RECALCULATE POSITIONS
     # --------------------------------------------------------
