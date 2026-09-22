@@ -1,0 +1,201 @@
+
+0s
+
+Run python trading_engine.py
+
+File "/home/runner/work/NSE_BHAVCOPY_DOWNLOAD/NSE_BHAVCOPY_DOWNLOAD/trading_engine.py", line 399
+
+if DRY_RUN and TEST_EXISTING_RANK1: 
+IndentationError: unexpected indent
+
+Error: Process completed with exit code 1.
+
+svgThis step was skipped
+
+0s
+
+svgThis step passed
+
+0s
+
+svgThis step passed
+
+0s
+
+
+This result tells us the MAX-AVERAGING test did not run.
+
+It behaved exactly like the normal test:
+
+DRY RUN: BUY MAHKTECH Qty=1148 Price=21.77
+That means the simulated AVERAGING_BUYS = 5 position was not loaded. The engine therefore saw no existing MAHKTECH position and correctly executed the normal Rank-1 BUY.
+
+Do not change the main trading engine yet.
+The likely issue is that the test version/workflow was not actually the version being executed. We need to check the GitHub Actions workflow/file before doing anything else.
+
+Please go to:
+
+GitHub → Actions
+
+and tell me the exact workflow name shown for the run you just executed.
+
+Alternatively, send me a screenshot of the Actions page. Then we'll fix this one step at a time.
+
+
+Trading Engine - DRY RUNTrading Engine - DRY RUN #18: Manually run by shekharhsb6-max
+
+
+Yes — that explains it completely.
+
+You ran:
+
+Trading Engine - DRY RUN #18
+
+That is the original normal DRY-RUN workflow, not the new MAX-AVERAGING TEST workflow.
+
+Therefore the result:
+
+DRY RUN: BUY MAHKTECH Qty=1148 Price=21.77
+is expected. The test position with AVERAGING_BUYS = 5 was never injected.
+
+Do this now
+Go to:
+
+GitHub → Actions
+
+You should see a separate workflow named something like:
+
+Trading Engine - DRY RUN - Max Averaging Test
+
+Select that workflow, then:
+
+Run workflow → Run workflow
+
+Important
+Do not run Trading Engine - DRY RUN #18 again.
+
+We want the new test workflow.
+
+The correct test output should contain something similar to:
+
+TEST MODE: Simulated MAHKTECH position with AVERAGING_BUYS=5
+followed by a message indicating that averaging is blocked because the maximum of 5 has already been reached.
+
+Send me that output after you run the Max Averaging Test workflow.
+
+
+no such workflow shown
+
+You're right. That means the MAX-AVERAGING workflow was not added to your GitHub repository. The file I gave you was only downloaded locally; it was not automatically created in GitHub.
+
+Let's fix it cleanly.
+
+Step 1 — Go to your repository
+Open:
+
+
+Then go to:
+
+.github → workflows
+
+You should see your existing workflow:
+
+trading_engine_dry_run.yml
+Step 2 — Create the new workflow
+Click:
+
+Add file → Upload files
+
+Upload this file:
+
+
+The file must end up at:
+
+.github/workflows/
+    trading_engine_dry_run_max_averaging_test.yml
+Commit it to main.
+
+Step 3 — Check Actions
+After the commit, go to:
+
+Actions
+
+You should now see a separate workflow:
+
+Trading Engine - DRY RUN - Max Averaging Test
+
+Only then run it.
+
+One important correction
+We also need to make sure the MAX-AVERAGING test version of trading_engine.py is actually in the repository when that workflow runs.
+
+So don't run anything yet after uploading the workflow.
+
+Once you have committed the workflow, tell me “workflow committed”. I'll give you the next single step so we don't accidentally replace your validated production engine.
+
+
+
+Library
+/
+trading_engine_dry_run_max_averaging_test.yml
+
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+20
+21
+22
+23
+24
+25
+26
+27
+28
+name: Trading Engine - DRY RUN - Max Averaging Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  max-averaging-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Google Sheet secret
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
+            echo "ERROR: GOOGLE_SPREADSHEET_ID is EMPTY"
+You’re making requests too quickly. We’ve temporarily limited access to your conversations to protect your data.
+
+Please wait a few minutes before trying again.
