@@ -291,7 +291,14 @@ def append_trade(sheet, trade):
         trade["REASON"],
         trade["SIGNAL_RANK"],
     ]
-
+    if DRY_RUN:
+        print(
+            f"DRY RUN: {trade['ACTION']} "
+            f"{trade['SYMBOL']} "
+            f"Qty={trade['QUANTITY']} "
+            f"Price={trade['PRICE']}"
+        )
+        return
     sheet.append_row(
         row,
         value_input_option="USER_ENTERED",
