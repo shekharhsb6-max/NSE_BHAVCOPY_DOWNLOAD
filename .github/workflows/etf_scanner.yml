@@ -1,23 +1,14 @@
-name: ETF Scanner
-
-on:
-  workflow_dispatch:
-
-jobs:
-  scan:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Check Google Sheet secret
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+        run: |
+          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
+            echo "ERROR: GOOGLE_SPREADSHEET_ID is EMPTY"
+            exit 1
+          else
+            echo "OK: GOOGLE_SPREADSHEET_ID is available"
+            echo "Length: ${#GOOGLE_SPREADSHEET_ID}"
+          fi
 
       - name: Run ETF Scanner
         run: python etf_scanner.py
