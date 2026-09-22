@@ -1116,8 +1116,15 @@ def write_etf_history_date_batch(
             }
         )
 
+        required_last_row = first_row + len(rows) - 1
+
+        if required_last_row > worksheet.row_count:
+            worksheet.add_rows(
+                required_last_row - worksheet.row_count
+            )
+
         worksheet.update(
-            range_name=f"A{first_row}:I{first_row + len(rows) - 1}",
+            range_name=f"A{first_row}:I{required_last_row}",
             values=rows,
             value_input_option="USER_ENTERED",
         )
@@ -1129,9 +1136,25 @@ def write_etf_history_date_batch(
         return
 
     next_row = len(values) + 1
+    required_last_row = next_row + len(rows) - 1
+
+    # Google Sheets does not automatically expand a worksheet when a range
+    # extends beyond its current row grid. Ensure enough rows exist before
+    # writing the batch.
+    current_row_count = worksheet.row_count
+
+    if required_last_row > current_row_count:
+        rows_to_add = required_last_row - current_row_count
+
+        print(
+            f"ETF_HISTORY grid has {current_row_count} rows; "
+            f"expanding by {rows_to_add} rows."
+        )
+
+        worksheet.add_rows(rows_to_add)
 
     worksheet.update(
-        range_name=f"A{next_row}:I{next_row + len(rows) - 1}",
+        range_name=f"A{next_row}:I{required_last_row}",
         values=rows,
         value_input_option="USER_ENTERED",
     )
