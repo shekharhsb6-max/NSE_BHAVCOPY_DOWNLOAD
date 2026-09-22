@@ -1084,39 +1084,20 @@ def write_etf_history_date_batch(
 
     if matching_rows:
         first_row = min(matching_rows)
-        start_index = first_row - 1
-        end_index = start_index + len(matching_rows)
-        sheet_id = worksheet.id
-
-        spreadsheet.batch_update(
-            {
-                "requests": [
-                    {
-                        "deleteDimension": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "dimension": "ROWS",
-                                "startIndex": start_index,
-                                "endIndex": end_index,
-                            }
-                        }
-                    },
-                    {
-                        "insertDimension": {
-                            "range": {
-                                "sheetId": sheet_id,
-                                "dimension": "ROWS",
-                                "startIndex": start_index,
-                                "endIndex": start_index + len(rows),
-                            },
-                            "inheritFromBefore": False,
-                        }
-                    },
-                ]
-            }
-        )
-
+        old_last_row = max(matching_rows)
         required_last_row = first_row + len(rows) - 1
+
+        # Do NOT delete/insert worksheet rows here. That can fail when the
+        # existing date ends exactly at the current grid boundary and an
+        # insertDimension request uses inheritFromBefore=False.
+        #
+        # Instead, clear the old date block and overwrite it in place.
+        # This is safer and preserves the sheet's physical row grid.
+        clear_last_row = max(old_last_row, required_last_row)
+
+        worksheet.batch_clear(
+            [f"A{first_row}:I{clear_last_row}"]
+        )
 
         if required_last_row > worksheet.row_count:
             worksheet.add_rows(
