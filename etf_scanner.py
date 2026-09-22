@@ -389,33 +389,15 @@ def calculate_scanner(history: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
 
         last_252 = symbol_history.tail(LOOKBACK_HIGH_DAYS)
 
-     # Adjust historical prices for the 27-Feb-2026 10:1
-# face-value split for the affected Kotak ETFs.
-split_symbols = {
-    "BANKNIFTY1",
-    "CONS",
-    "SILVER1",
-    "NV20",
-    "MIDCAP",
-}
-
-price_history_252 = last_252.copy()
-
-if symbol in split_symbols:
-    split_date = pd.Timestamp("2026-02-27")
-
-    price_history_252.loc[
-        price_history_252["TRADE_DATE"] < split_date,
-        "HIGH"
-    ] = (
-        price_history_252.loc[
-            price_history_252["TRADE_DATE"] < split_date,
-            "HIGH"
-        ] / 10.0
-    )
-
-        # Adjust historical prices for the 27-Feb-2026 10:1
-        # face-value split for the affected Kotak ETFs.
+        # ---------------------------------------------------------------
+        # CORPORATE-ACTION ADJUSTMENT FOR 27-FEB-2026 10:1 SPLIT
+        # ---------------------------------------------------------------
+        # ETF_HISTORY remains raw exchange data.  For the 252-session
+        # high/correction calculation only, pre-split HIGH values are
+        # adjusted to the post-split unit basis.
+        #
+        # Affected Kotak ETFs: BANKNIFTY1, CONS, SILVER1, NV20, MIDCAP.
+        # Split effective date: 27-Feb-2026.
         split_symbols = {
             "BANKNIFTY1",
             "CONS",
@@ -428,22 +410,16 @@ if symbol in split_symbols:
 
         if symbol in split_symbols:
             split_date = pd.Timestamp("2026-02-27")
+            pre_split_mask = (
+                price_history_252["TRADE_DATE"] < split_date
+            )
 
-            price_history_252.loc[
-                price_history_252["TRADE_DATE"] < split_date,
-                "HIGH"
-            ] = (
-                price_history_252.loc[
-                    price_history_252["TRADE_DATE"] < split_date,
-                    "HIGH"
-                ] / 10.0
+            price_history_252.loc[pre_split_mask, "HIGH"] = (
+                price_history_252.loc[pre_split_mask, "HIGH"] / 10.0
             )
 
         high_252 = price_history_252["HIGH"].max()
 
-        today_row = signal_df[
-            signal_df["SYMBOL"] == symbol
-        ].iloc[0]
         today_row = signal_df[
             signal_df["SYMBOL"] == symbol
         ].iloc[0]
