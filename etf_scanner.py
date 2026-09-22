@@ -389,7 +389,32 @@ def calculate_scanner(history: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame
 
         last_252 = symbol_history.tail(LOOKBACK_HIGH_DAYS)
 
-        high_252 = last_252["HIGH"].max()
+     # Adjust historical prices for the 27-Feb-2026 10:1
+# face-value split for the affected Kotak ETFs.
+split_symbols = {
+    "BANKNIFTY1",
+    "CONS",
+    "SILVER1",
+    "NV20",
+    "MIDCAP",
+}
+
+price_history_252 = last_252.copy()
+
+if symbol in split_symbols:
+    split_date = pd.Timestamp("2026-02-27")
+
+    price_history_252.loc[
+        price_history_252["TRADE_DATE"] < split_date,
+        "HIGH"
+    ] = (
+        price_history_252.loc[
+            price_history_252["TRADE_DATE"] < split_date,
+            "HIGH"
+        ] / 10.0
+    )
+
+high_252 = price_history_252["HIGH"].max()
 
         today_row = signal_df[
             signal_df["SYMBOL"] == symbol
