@@ -165,7 +165,9 @@ def write_positions(sheet, positions):
             p["TARGET_PRICE"],
             p["STATUS"],
         ])
-
+    if DRY_RUN:
+        print("DRY RUN: POSITIONS sheet will NOT be modified.")
+        return
     sheet.clear()
     sheet.update(
         f"A1:M{len(rows)}",
