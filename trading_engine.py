@@ -592,7 +592,43 @@ def main():
     # --------------------------------------------------------
 
     buy_done = False
+    # ------------------------------------------------
+    # SAME-DAY DUPLICATE BUY/AVERAGE PROTECTION
+    # ------------------------------------------------
 
+    today_buys = 0
+
+    ledger_values = ledger_sheet.get_all_values()
+
+    if len(ledger_values) >= 2:
+
+        ledger_headers = ledger_values[0]
+
+        date_index = ledger_headers.index("TRADE_DATE")
+        action_index = ledger_headers.index("ACTION")
+
+        for row in ledger_values[1:]:
+
+            if len(row) <= max(date_index, action_index):
+                continue
+
+            ledger_date = str(row[date_index]).strip()
+            ledger_action = str(row[action_index]).strip().upper()
+
+            if (
+                ledger_date == str(trade_date)
+                and ledger_action in ("BUY", "AVERAGE")
+            ):
+                today_buys += 1
+
+    if today_buys >= 1:
+
+        print(
+            f"BUY BLOCKED: A BUY/AVERAGE already exists "
+            f"for {trade_date}."
+        )
+
+        buy_done = True
     allocation = number(
         config.get(
             "BUY_ALLOCATION_PCT",
