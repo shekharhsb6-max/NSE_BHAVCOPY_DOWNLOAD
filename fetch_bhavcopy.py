@@ -514,6 +514,97 @@ def clean_bhavcopy(
         & out["SYMBOL"].ne("nan")
     ]
 
+    # ------------------------------------------------------------------------
+    # PRICE INTEGRITY VALIDATION / SCALE-ERROR REPAIR
+    # ------------------------------------------------------------------------
+    # Some historical source rows can contain a transient 10x-style price
+    # scaling error.  Do NOT apply a blanket divide-by-10 rule.  Repair only
+    # when all available OHLC/LAST prices are scaled by approximately the
+    # same integer factor relative to PREV_CLOSE.  This is deliberately
+    # conservative and is controlled by environment variables so the rule
+    # can be tightened later.
+    try:
+        min_scale_factor = float(os.environ.get("PRICE_ANOMALY_MIN_FACTOR", "5"))
+        max_scale_factor = float(os.environ.get("PRICE_ANOMALY_MAX_FACTOR", "20"))
+        scale_tolerance = float(os.environ.get("PRICE_ANOMALY_SCALE_TOLERANCE", "0.02"))
+    except ValueError:
+        min_scale_factor = 5.0
+        max_scale_factor = 20.0
+        scale_tolerance = 0.02
+
+    price_columns = ["OPEN", "HIGH", "LOW", "CLOSE", "LAST"]
+    repair_count = 0
+
+    for idx in out.index:
+        prev_close = out.at[idx, "PREV_CLOSE"]
+
+        if prev_close is None or pd.isna(prev_close) or float(prev_close) <= 0:
+            continue
+
+        prices = []
+        for column in price_columns:
+            value = out.at[idx, column]
+            if value is None or pd.isna(value) or float(value) <= 0:
+                break
+            prices.append(float(value))
+        else:
+            ratios = [price / float(prev_close) for price in prices]
+            median_ratio = float(pd.Series(ratios).median())
+            candidate_factor = round(median_ratio)
+
+            if (
+                min_scale_factor <= candidate_factor <= max_scale_factor
+                and abs(median_ratio / candidate_factor - 1.0) <= scale_tolerance
+                and max(ratios) / min(ratios) <= 1.05
+            ):
+                print(
+                    "PRICE ANOMALY REPAIRED: "
+                    f"{out.at[idx, 'SYMBOL']} {trade_date_text} | "
+                    f"detected approximately {candidate_factor}x price scaling. "
+                    f"Median ratio={median_ratio:.6f}."
+                )
+
+                for column in price_columns:
+                    out.at[idx, column] = float(out.at[idx, column]) / candidate_factor
+
+                repair_count += 1
+
+    # Hard OHLC relationship validation after any conservative repair.
+    invalid_ohlc = []
+
+    for idx in out.index:
+        open_price = out.at[idx, "OPEN"]
+        high_price = out.at[idx, "HIGH"]
+        low_price = out.at[idx, "LOW"]
+        close_price = out.at[idx, "CLOSE"]
+
+        if any(
+            value is None or pd.isna(value) or float(value) <= 0
+            for value in [open_price, high_price, low_price, close_price]
+        ):
+            invalid_ohlc.append(idx)
+            continue
+
+        if not (
+            float(high_price) >= max(float(open_price), float(close_price))
+            and float(low_price) <= min(float(open_price), float(close_price))
+            and float(high_price) >= float(low_price)
+        ):
+            invalid_ohlc.append(idx)
+
+    if invalid_ohlc:
+        symbols = [str(out.at[idx, "SYMBOL"]) for idx in invalid_ohlc[:10]]
+        raise RuntimeError(
+            "OHLC integrity validation failed after conservative repair for "
+            f"{len(invalid_ohlc)} row(s), symbols={symbols}. "
+            "The affected rows were NOT allowed to continue into the sheet."
+        )
+
+    if repair_count:
+        print(f"PRICE INTEGRITY: repaired {repair_count} scaled-price row(s).")
+    else:
+        print("PRICE INTEGRITY: no scaled-price anomalies detected.")
+
     # Exact A:O order.
     out = out[RAW_HEADERS]
 
