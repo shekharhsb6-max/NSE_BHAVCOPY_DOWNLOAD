@@ -1001,7 +1001,8 @@ def main() -> int:
         os.environ.get("GOOGLE_SPREADSHEET_ID", "").strip()
         or DEFAULT_SPREADSHEET_ID
     )
-        sheet_name = (
+
+    sheet_name = (
         os.environ.get("SHEET_NAME", "").strip()
         or DEFAULT_SHEET_NAME
     )
