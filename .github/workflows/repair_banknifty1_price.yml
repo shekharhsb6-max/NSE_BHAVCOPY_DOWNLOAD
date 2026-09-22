@@ -1,0 +1,26 @@
+name: Repair BANKNIFTY1 Bad Price
+
+on:
+  workflow_dispatch:
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install gspread google-auth
+
+      - name: Repair BANKNIFTY1 18-Feb-2026
+        run: python repair_banknifty1_price.py
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
