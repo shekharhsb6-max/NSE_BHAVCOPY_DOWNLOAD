@@ -6,6 +6,10 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+TEST_AVERAGING = (
+    os.environ.get("TEST_AVERAGING", "false").lower()
+    == "true"
+)
 
 
 
