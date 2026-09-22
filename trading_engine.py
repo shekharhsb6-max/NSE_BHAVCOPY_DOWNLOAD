@@ -5,6 +5,7 @@ from datetime import datetime
 
 import gspread
 from google.oauth2.service_account import Credentials
+DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 
 # ============================================================
