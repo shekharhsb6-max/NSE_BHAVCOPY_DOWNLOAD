@@ -653,7 +653,7 @@ def main():
     # 4. AVERAGE FIRST
     # --------------------------------------------------------
 
-    if averaging_candidates:
+    if not buy_done and averaging_candidates:
 
         fall_pct, position = averaging_candidates[0]
 
