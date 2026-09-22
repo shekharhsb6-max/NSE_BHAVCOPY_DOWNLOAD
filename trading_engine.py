@@ -397,6 +397,27 @@ def main():
     positions = read_positions(
         positions_sheet
     )
+        if DRY_RUN and TEST_AVERAGING:
+        positions.append({
+            "SYMBOL": "MAHKTECH",
+            "CATEGORY": "TEST",
+            "QUANTITY": 100,
+            "AVG_COST": 21.77,
+            "INVESTED_VALUE": 2177.00,
+            "CURRENT_PRICE": 20.50,
+            "CURRENT_VALUE": 2050.00,
+            "UNREALIZED_PNL": -127.00,
+            "UNREALIZED_PNL_PCT": -5.83,
+            "AVERAGING_BUYS": 0,
+            "LAST_BUY_DATE": "",
+            "TARGET_PRICE": 23.158,
+            "STATUS": "OPEN",
+        })
+
+        print(
+            "TEST MODE: Simulated MAHKTECH "
+            "position for averaging test."
+        )
 
     scanner = read_scanner(
         scanner_sheet
