@@ -408,10 +408,11 @@ def main():
 
     cash = state["EQUITY_AVAILABLE"]
 
-    trade_date = today_string()
+ trade_date = scanner[-1]["TRADE_DATE"]
 
     # --------------------------------------------------------
-    # UPDATE CURRENT PRICES
+    # UPDATE CURRENT 
+PRICES
     # --------------------------------------------------------
 
     for position in positions:
