@@ -1007,11 +1007,12 @@ def main() -> int:
     )
 
     if mode == "BACKFILL":
-        return run_historical_backfill(
-            requested_date=requested_date,
-            spreadsheet_id=spreadsheet_id,
-            sheet_name=sheet_name,
-        )
+    run_historical_backfill(
+        requested_date=requested_date,
+        spreadsheet_id=spreadsheet_id,
+        sheet_name=sheet_name,
+    )
+    return 0
 
     if mode != "DAILY":
         raise RuntimeError("MODE must be DAILY or BACKFILL.")
