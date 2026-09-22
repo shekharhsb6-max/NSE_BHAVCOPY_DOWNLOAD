@@ -6,8 +6,8 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_AVERAGING = (
-    os.environ.get("TEST_AVERAGING", "false").lower()
+TEST_MAX_AVERAGING = (
+    os.environ.get("TEST_MAX_AVERAGING", "false").lower()
     == "true"
 )
 
@@ -398,7 +398,7 @@ def main():
         positions_sheet
     )
 
-    if DRY_RUN and TEST_AVERAGING:
+    if DRY_RUN and TEST_MAX_AVERAGING:
         positions.append({
             "SYMBOL": "MAHKTECH",
             "CATEGORY": "TEST",
@@ -409,7 +409,7 @@ def main():
             "CURRENT_VALUE": 2050.00,
             "UNREALIZED_PNL": -127.00,
             "UNREALIZED_PNL_PCT": -5.83,
-            "AVERAGING_BUYS": 0,
+            "AVERAGING_BUYS": 5,
             "LAST_BUY_DATE": "",
             "TARGET_PRICE": 23.158,
             "STATUS": "OPEN",
@@ -417,7 +417,8 @@ def main():
 
         print(
             "TEST MODE: Simulated MAHKTECH "
-            "position for averaging test."
+            "position with AVERAGING_BUYS=5 "
+            "for max-averaging test."
         )
 
     scanner = read_scanner(
@@ -441,7 +442,7 @@ def main():
         if row.get("TRADE_DATE")
     )
 
-    if DRY_RUN and TEST_AVERAGING:
+    if DRY_RUN and TEST_MAX_AVERAGING:
         latest_prices["MAHKTECH"] = {
             "DATE": trade_date,
             "CLOSE": 20.50,
@@ -619,6 +620,26 @@ def main():
         key=lambda x: x[0],
         reverse=True,
     )
+
+    if DRY_RUN and TEST_MAX_AVERAGING:
+        test_position = next(
+            (
+                p for p in positions
+                if p["SYMBOL"] == "MAHKTECH"
+            ),
+            None,
+        )
+
+        if test_position is not None:
+            if test_position["AVERAGING_BUYS"] >= max_averaging:
+                print(
+                    "MAX-AVERAGING TEST: MAHKTECH has "
+                    f"{test_position['AVERAGING_BUYS']} averaging buys; "
+                    f"maximum allowed is {max_averaging}."
+                )
+                print(
+                    "MAX-AVERAGING TEST: MAHKTECH must NOT be averaged."
+                )
 
     # --------------------------------------------------------
     # 3. MAX ONE BUY/AVERAGE PER DAY
@@ -889,7 +910,7 @@ def main():
                             "CURRENT_VALUE": gross_value,
                             "UNREALIZED_PNL": 0,
                             "UNREALIZED_PNL_PCT": 0,
-                            "AVERAGING_BUYS": 0,
+                            "AVERAGING_BUYS": 5,
                             "LAST_BUY_DATE": trade_date,
                             "TARGET_PRICE": (
                                 price
