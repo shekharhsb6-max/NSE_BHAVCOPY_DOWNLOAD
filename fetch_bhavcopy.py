@@ -1374,7 +1374,33 @@ def run_etf_history_backfill(
             checked += 1
             continue
 
-        df = clean_bhavcopy(raw_df, actual_trade_date)
+        # This backfill is ETF-only. Filter to mapped ETF symbols before
+        # OHLC validation so unrelated equity rows with data anomalies cannot
+        # abort an otherwise usable ETF historical session.
+        etf_symbols = set(category_map.keys())
+        symbol_col = next(
+            (
+                col
+                for col in raw_df.columns
+                if str(col).strip().upper() == "SYMBOL"
+            ),
+            None,
+        )
+        if symbol_col is not None:
+            etf_raw_df = raw_df[
+                raw_df[symbol_col].astype(str).str.strip().isin(etf_symbols)
+            ].copy()
+        else:
+            etf_raw_df = raw_df
+
+        if etf_raw_df.empty:
+            print(f"No mapped ETF symbols found in raw data for {candidate}.")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        etf_raw_df.attrs["trade_date"] = actual_trade_date
+        df = clean_bhavcopy(etf_raw_df, actual_trade_date)
         etf_df = prepare_etf_history_batch(df, category_map)
 
         if not etf_df.empty:
