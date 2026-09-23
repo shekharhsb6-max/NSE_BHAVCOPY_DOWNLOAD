@@ -6,7 +6,6 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_INVALID_PRICE = os.environ.get("TEST_INVALID_PRICE", "false").lower() == "true"
 
 
 
@@ -66,15 +65,6 @@ def whole_units(cash, price):
         return 0
 
     return math.floor(cash / price)
-
-
-def valid_trade_price(price):
-    """Return True only for a finite, strictly positive trade price."""
-    try:
-        value = float(price)
-        return math.isfinite(value) and value > 0
-    except (TypeError, ValueError):
-        return False
 
 
 def today_string():
@@ -424,13 +414,6 @@ def main():
         for row in scanner
         if row.get("TRADE_DATE")
     )
-
-    if DRY_RUN and TEST_INVALID_PRICE:
-        latest_prices["MAHKTECH"] = {
-            "DATE": trade_date,
-            "CLOSE": None,
-        }
-        print("TEST MODE: MAHKTECH test price set to INVALID/MISSING (None).")
 
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
@@ -818,121 +801,111 @@ def main():
                     symbol
                 ]["CLOSE"]
 
-                if not valid_trade_price(price):
+                budget = min(
+                    purchase_budget,
+                    cash,
+                )
 
-                    print(
-                        f"INVALID-PRICE TEST: Skipping {symbol}: "
-                        f"invalid/missing price = {price!r}."
-                    )
-                    buy_done = True
+                quantity = whole_units(
+                    budget,
+                    price,
+                )
 
-                else:
+                if quantity > 0:
 
-                    budget = min(
-                        purchase_budget,
-                        cash,
-                    )
-
-                    quantity = whole_units(
-                        budget,
-                        price,
+                    gross_value = (
+                        quantity * price
                     )
 
-                    if quantity > 0:
+                    cash_before = cash
 
-                        gross_value = (
-                            quantity * price
+                    # Existing position should normally
+                    # have been handled by averaging.
+                    existing = None
+
+                    for p in positions:
+
+                        if p["SYMBOL"] == symbol:
+                            existing = p
+                            break
+
+                    if existing is not None:
+
+                        print(
+                            f"Skipping {symbol}: "
+                            "already held and not eligible "
+                            "for averaging."
                         )
 
-                        cash_before = cash
+                        # Rule A:
+                        # If FINAL_RANK 1 is already held and it has
+                        # not qualified for averaging, do nothing today.
+                        buy_done = True
 
-                        # Existing position should normally
-                        # have been handled by averaging.
-                        existing = None
+                    else:
 
-                        for p in positions:
+                        new_position = {
+                            "SYMBOL": symbol,
+                            "CATEGORY": candidate.get(
+                                "CATEGORY",
+                                "",
+                            ),
+                            "QUANTITY": quantity,
+                            "AVG_COST": price,
+                            "INVESTED_VALUE": gross_value,
+                            "CURRENT_PRICE": price,
+                            "CURRENT_VALUE": gross_value,
+                            "UNREALIZED_PNL": 0,
+                            "UNREALIZED_PNL_PCT": 0,
+                            "AVERAGING_BUYS": 0,
+                            "LAST_BUY_DATE": trade_date,
+                            "TARGET_PRICE": (
+                                price
+                                * (1 + target_profit / 100)
+                            ),
+                            "STATUS": "OPEN",
+                        }
 
-                            if p["SYMBOL"] == symbol:
-                                existing = p
-                                break
+                        positions.append(
+                            new_position
+                        )
 
-                        if existing is not None:
+                        action = "BUY"
 
-                            print(
-                                f"Skipping {symbol}: "
-                                "already held and not eligible "
-                                "for averaging."
-                            )
+                        avg_before = 0
+                        avg_after = price
+                        averaging_count = 0
 
-                            # Rule A:
-                            # If FINAL_RANK 1 is already held and it has
-                            # not qualified for averaging, do nothing today.
-                            buy_done = True
+                        cash -= gross_value
 
-                        else:
-
-                            new_position = {
+                        append_trade(
+                            ledger_sheet,
+                            {
+                                "TRADE_DATE": trade_date,
+                                "ACTION": action,
                                 "SYMBOL": symbol,
                                 "CATEGORY": candidate.get(
                                     "CATEGORY",
                                     "",
                                 ),
                                 "QUANTITY": quantity,
-                                "AVG_COST": price,
-                                "INVESTED_VALUE": gross_value,
-                                "CURRENT_PRICE": price,
-                                "CURRENT_VALUE": gross_value,
-                                "UNREALIZED_PNL": 0,
-                                "UNREALIZED_PNL_PCT": 0,
-                                "AVERAGING_BUYS": 0,
-                                "LAST_BUY_DATE": trade_date,
-                                "TARGET_PRICE": (
-                                    price
-                                    * (1 + target_profit / 100)
+                                "PRICE": price,
+                                "GROSS_VALUE": gross_value,
+                                "AVG_COST_BEFORE": avg_before,
+                                "AVG_COST_AFTER": avg_after,
+                                "AVERAGING_BUYS": averaging_count,
+                                "REALIZED_PNL": 0,
+                                "CASH_BEFORE": cash_before,
+                                "CASH_AFTER": cash,
+                                "REASON": "FINAL_RANK_1",
+                                "SIGNAL_RANK": candidate.get(
+                                    "FINAL_RANK",
+                                    1,
                                 ),
-                                "STATUS": "OPEN",
-                            }
+                            },
+                        )
 
-                            positions.append(
-                                new_position
-                            )
-
-                            action = "BUY"
-
-                            avg_before = 0
-                            avg_after = price
-                            averaging_count = 0
-
-                            cash -= gross_value
-
-                            append_trade(
-                                ledger_sheet,
-                                {
-                                    "TRADE_DATE": trade_date,
-                                    "ACTION": action,
-                                    "SYMBOL": symbol,
-                                    "CATEGORY": candidate.get(
-                                        "CATEGORY",
-                                        "",
-                                    ),
-                                    "QUANTITY": quantity,
-                                    "PRICE": price,
-                                    "GROSS_VALUE": gross_value,
-                                    "AVG_COST_BEFORE": avg_before,
-                                    "AVG_COST_AFTER": avg_after,
-                                    "AVERAGING_BUYS": averaging_count,
-                                    "REALIZED_PNL": 0,
-                                    "CASH_BEFORE": cash_before,
-                                    "CASH_AFTER": cash,
-                                    "REASON": "FINAL_RANK_1",
-                                    "SIGNAL_RANK": candidate.get(
-                                        "FINAL_RANK",
-                                        1,
-                                    ),
-                                },
-                            )
-
-                            buy_done = True
+                        buy_done = True
     # --------------------------------------------------------
     # 6. RECALCULATE POSITIONS
     # --------------------------------------------------------
