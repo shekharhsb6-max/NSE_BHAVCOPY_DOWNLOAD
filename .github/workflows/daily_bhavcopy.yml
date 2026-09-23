@@ -1,10 +1,12 @@
-name: NSE Historical Backfill
+name: NSE Daily Bhavcopy
 
 on:
+  schedule:
+    - cron: "30 13 * * 1-5"
   workflow_dispatch:
 
 jobs:
-  backfill:
+  daily:
     runs-on: ubuntu-latest
 
     steps:
@@ -19,11 +21,27 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run NSE 252-Day ETF Historical Backfill
-        run: python fetch_bhavcopy.py
+      - name: Check Google Sheet secrets
         env:
-          MODE: BACKFILL
-          BACKFILL_TRADING_DAYS: "252"
-          BACKFILL_MAX_CALENDAR_DAYS: "450"
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
+            echo "ERROR: GOOGLE_SPREADSHEET_ID is EMPTY"
+            exit 1
+          fi
+
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON is EMPTY"
+            exit 1
+          fi
+
+          echo "Google Sheet credentials are available."
+
+      - name: Run NSE Daily Bhavcopy
+        env:
+          MODE: DAILY
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python fetch_bhavcopy.py
