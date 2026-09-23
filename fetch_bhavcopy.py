@@ -1650,6 +1650,43 @@ def main() -> int:
     )
 
     # ------------------------------------------------------------------------
+    # Update ETF_HISTORY from the same successfully downloaded NSE data.
+    # This keeps ETF_HISTORY synchronized with RAW_DATA before the ETF
+    # Scanner workflow starts. No second NSE download is performed.
+    # ------------------------------------------------------------------------
+
+    category_map = get_etf_category_map(spreadsheet_id)
+
+    etf_history_df = prepare_etf_history_batch(
+        df,
+        category_map,
+    )
+
+    if not etf_history_df.empty:
+        _, etf_history_worksheet = get_worksheet(
+            spreadsheet_id,
+            DEFAULT_ETF_HISTORY_SHEET_NAME,
+        )
+
+        ensure_etf_history_header(etf_history_worksheet)
+
+        write_etf_history_date_batch(
+            spreadsheet,
+            etf_history_worksheet,
+            etf_history_df,
+        )
+
+        print(
+            f"ETF_HISTORY synchronized for {actual_trade_date}: "
+            f"{len(etf_history_df)} ETF rows."
+        )
+    else:
+        print(
+            "ETF_HISTORY synchronization skipped: "
+            "no Category_Map ETFs found in today's data."
+        )
+
+    # ------------------------------------------------------------------------
     # Final summary.
     # ------------------------------------------------------------------------
 
