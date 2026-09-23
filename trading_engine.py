@@ -6,9 +6,7 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_EXIT = (
-    os.environ.get("TEST_EXIT", "false").lower() == "true"
-)
+TEST_DUPLICATE_BUY = os.environ.get("TEST_DUPLICATE_BUY", "false").lower() == "true"
 
 
 
@@ -397,32 +395,6 @@ def main():
         positions_sheet
     )
 
-    # --------------------------------------------------------
-    # TEST MODE: PROFIT-TARGET EXIT
-    # --------------------------------------------------------
-    # Simulate an existing MAHKTECH position above the configured
-    # 6.38% profit target. DRY RUN only.
-    if DRY_RUN and TEST_EXIT:
-        positions.append({
-            "SYMBOL": "MAHKTECH",
-            "CATEGORY": "TEST",
-            "QUANTITY": 100,
-            "AVG_COST": 21.77,
-            "INVESTED_VALUE": 2177.00,
-            "CURRENT_PRICE": 23.20,
-            "CURRENT_VALUE": 2320.00,
-            "UNREALIZED_PNL": 143.00,
-            "UNREALIZED_PNL_PCT": 6.5687,
-            "AVERAGING_BUYS": 0,
-            "LAST_BUY_DATE": "",
-            "TARGET_PRICE": 23.158126,
-            "STATUS": "OPEN",
-        })
-        print(
-            "TEST MODE: Simulated MAHKTECH position "
-            "for profit-target EXIT test."
-        )
-
     scanner = read_scanner(
         scanner_sheet
     )
@@ -443,16 +415,6 @@ def main():
         for row in scanner
         if row.get("TRADE_DATE")
     )
-
-    if DRY_RUN and TEST_EXIT:
-        latest_prices["MAHKTECH"] = {
-            "DATE": trade_date,
-            "CLOSE": 23.20,
-        }
-        print(
-            "TEST MODE: MAHKTECH test price overridden "
-            "to ₹23.20."
-        )
 
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
@@ -564,13 +526,6 @@ def main():
                 position["SYMBOL"]
             )
 
-            if DRY_RUN and TEST_EXIT:
-                print(
-                    f"EXIT TEST: SELL {position['SYMBOL']} "
-                    f"Qty={quantity} Price={price:.2f} "
-                    f"Reason=TARGET_PROFIT"
-                )
-
         else:
 
             remaining_positions.append(
@@ -646,6 +601,35 @@ def main():
     today_buys = 0
 
     ledger_values = ledger_sheet.get_all_values()
+
+    # ------------------------------------------------
+    # TEST MODE: DUPLICATE BUY PROTECTION
+    # ------------------------------------------------
+    # Inject a simulated BUY already recorded for today.
+    # This must block any second BUY/AVERAGE in the same run/day.
+    if DRY_RUN and TEST_DUPLICATE_BUY:
+        ledger_values = list(ledger_values)
+        ledger_values.append([
+            trade_date,
+            "BUY",
+            "MAHKTECH",
+            "TEST",
+            1148,
+            21.77,
+            24991.96,
+            0,
+            21.77,
+            0,
+            0,
+            300000,
+            275008.04,
+            "TEST_EXISTING_BUY",
+            1,
+        ])
+        print(
+            "TEST MODE: Simulated BUY already recorded for "
+            f"{trade_date}."
+        )
 
     if len(ledger_values) >= 2:
 
