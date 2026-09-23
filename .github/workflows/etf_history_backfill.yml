@@ -1,0 +1,42 @@
+name: ETF History Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      sessions:
+        description: "Number of ETF trading sessions to maintain"
+        required: true
+        default: "1000"
+        type: string
+      end_date:
+        description: "End date (YYYY-MM-DD)"
+        required: false
+        type: string
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Backfill ETF history
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          MODE: BACKFILL
+          BACKFILL_TRADING_DAYS: ${{ inputs.sessions }}
+          BACKFILL_MAX_CALENDAR_DAYS: "1600"
+          BHAVCOPY_DATE: ${{ inputs.end_date }}
+        run: |
+          python fetch_bhavcopy.py
