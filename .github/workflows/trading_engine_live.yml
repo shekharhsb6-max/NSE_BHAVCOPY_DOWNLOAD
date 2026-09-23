@@ -3,14 +3,14 @@ name: Trading Engine - LIVE
 on:
   workflow_run:
     workflows:
-      - ETF Scanner
+      - Bucket Engine - LIVE
     types:
       - completed
 
   workflow_dispatch:
 
 jobs:
-  live:
+  trading:
     if: >
       github.event_name == 'workflow_dispatch' ||
       (
@@ -21,13 +21,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: main
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -40,12 +38,10 @@ jobs:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
           if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
-            echo "ERROR: GOOGLE_SPREADSHEET_ID is EMPTY"
             exit 1
           fi
 
           if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
-            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON is EMPTY"
             exit 1
           fi
 
@@ -56,5 +52,4 @@ jobs:
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRY_RUN: "false"
-        run: |
-          python trading_engine.py
+        run: python trading_engine.py
