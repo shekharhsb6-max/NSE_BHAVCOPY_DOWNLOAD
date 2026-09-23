@@ -306,7 +306,7 @@ def main():
                             trade_date.date().isoformat(), "BUY", symbol,
                             str(rank1["CATEGORY"]), qty, price, gross,
                             0, price, 0, 0, cash,
-                            "FINAL_RANK_1", int(rank1["FINAL_RANK"])
+                            "FINAL_RANK_1", int(rank1["FINAL_RANK"]) if pd.notna(rank1["FINAL_RANK"]) else 1
                         ])
                         buy_done = True
 
