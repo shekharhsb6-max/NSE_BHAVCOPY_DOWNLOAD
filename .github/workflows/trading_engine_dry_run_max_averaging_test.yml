@@ -1,10 +1,10 @@
-name: Trading Engine - DRY RUN - Max Averaging Test
+name: Trading Engine - DRY RUN - Duplicate BUY Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  max-averaging-test:
+  duplicate-buy-test:
     runs-on: ubuntu-latest
 
     steps:
@@ -36,11 +36,11 @@ jobs:
 
           echo "Google Sheet credentials are available."
 
-      - name: Run Trading Engine - MAX AVERAGING TEST
+      - name: Run Trading Engine - Duplicate BUY Test
         env:
           GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           DRY_RUN: "true"
-          TEST_MAX_AVERAGING: "true"
+          TEST_DUPLICATE_BUY: "true"
         run: |
           python trading_engine.py
