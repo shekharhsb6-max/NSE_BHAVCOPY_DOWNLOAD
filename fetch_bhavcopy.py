@@ -1377,7 +1377,14 @@ def run_etf_history_backfill(
         # This backfill is ETF-only. Filter to mapped ETF symbols before
         # OHLC validation so unrelated equity rows with data anomalies cannot
         # abort an otherwise usable ETF historical session.
-        etf_symbols = set(category_map.keys())
+        # Ignore blank/NaN keys in Category_Map. A blank key can otherwise
+        # become the literal string "nan" during matching and accidentally
+        # admit rows with missing SYMBOL values.
+        etf_symbols = {
+            str(symbol).strip()
+            for symbol in category_map.keys()
+            if pd.notna(symbol) and str(symbol).strip().lower() not in ("", "nan", "none")
+        }
         symbol_col = next(
             (
                 col
@@ -1387,8 +1394,10 @@ def run_etf_history_backfill(
             None,
         )
         if symbol_col is not None:
+            symbol_series = raw_df[symbol_col]
             etf_raw_df = raw_df[
-                raw_df[symbol_col].astype(str).str.strip().isin(etf_symbols)
+                symbol_series.notna()
+                & symbol_series.astype(str).str.strip().isin(etf_symbols)
             ].copy()
         else:
             etf_raw_df = raw_df
