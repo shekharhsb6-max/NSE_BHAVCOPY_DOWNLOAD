@@ -1,0 +1,55 @@
+name: ETF Strategy Backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "Optional backtest start date YYYY-MM-DD"
+        required: false
+        type: string
+      end_date:
+        description: "Optional backtest end date YYYY-MM-DD"
+        required: false
+        type: string
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Google Sheet secrets
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
+            echo "ERROR: GOOGLE_SPREADSHEET_ID is EMPTY"
+            exit 1
+          fi
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            echo "ERROR: GOOGLE_SERVICE_ACCOUNT_JSON is EMPTY"
+            exit 1
+          fi
+          echo "Google Sheet credentials are available."
+
+      - name: Run permanent backtester
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          BACKTEST_START_DATE: ${{ inputs.start_date }}
+          BACKTEST_END_DATE: ${{ inputs.end_date }}
+        run: |
+          python backtest_engine.py
