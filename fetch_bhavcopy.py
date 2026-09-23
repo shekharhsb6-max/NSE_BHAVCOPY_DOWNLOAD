@@ -932,15 +932,30 @@ def write_date_batch(
             f"Replacing those rows with {len(rows)} fresh rows."
         )
 
+        # If the replacement has exactly the same number of rows, update
+        # the existing range in place. This is important when the date is
+        # already at the bottom of a sheet whose grid is exactly full: a
+        # delete+insertDimension request at grid_size is rejected by Sheets.
+        if len(matching_rows) == len(rows):
+            worksheet.update(
+                range_name=f"A{first_row}:O{first_row + len(rows) - 1}",
+                values=rows,
+                value_input_option="USER_ENTERED",
+            )
+
+            print(
+                f"Successfully replaced {source_date} "
+                f"with {len(rows)} rows in place."
+            )
+            return
+
         # Google Sheets row indexes are zero-based in batch requests.
         start_index = first_row - 1
         end_index = start_index + len(matching_rows)
 
         sheet_id = worksheet.id
 
-        # One batch request:
-        # 1. delete existing date rows
-        # 2. insert the new number of rows
+        # Different row counts require resizing the existing date block.
         spreadsheet.batch_update(
             {
                 "requests": [
@@ -969,7 +984,6 @@ def write_date_batch(
             }
         )
 
-        # One range write for the entire date.
         worksheet.update(
             range_name=f"A{first_row}:O{first_row + len(rows) - 1}",
             values=rows,
