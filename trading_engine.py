@@ -312,66 +312,86 @@ def append_trade(sheet, trade):
 
 def initialize_state(config, state_sheet):
 
+    # --------------------------------------------------------
+    # Read the Bucket Engine's current state.
+    # EQUITY_TARGET is now the source of truth for the
+    # Trading Engine.
+    # --------------------------------------------------------
+
+    previous_values = state_sheet.get_all_values()
+
     total_capital = number(
         config.get("TOTAL_CAPITAL")
     )
 
-    equity_pct = number(
-        config.get("EQUITY_BUCKET_PCT")
-    )
-
-    if equity_pct == 0:
-        equity_pct = number(
-            config.get("EQUITY_PCT"),
-            60,
-        )
-
-    equity_target = (
-        total_capital * equity_pct / 100
-    )
-
-    # --------------------------------------------------------
-    # Recover previously saved equity cash.
-    # If no valid previous state exists, initialize the
-    # equity bucket with its configured target.
-    # --------------------------------------------------------
-
-    previous_values = state_sheet.get_all_values()
+    equity_target = 0.0
+    previous_cash = -1.0
 
     if len(previous_values) >= 2:
 
         headers = previous_values[0]
         values = previous_values[1]
 
-        if "EQUITY_AVAILABLE" in headers:
+        if "TOTAL_CAPITAL" in headers:
+            total_index = headers.index("TOTAL_CAPITAL")
 
-            equity_index = headers.index(
-                "EQUITY_AVAILABLE"
-            )
+            if len(values) > total_index:
+                state_total_capital = number(values[total_index])
+
+                if state_total_capital > 0:
+                    total_capital = state_total_capital
+
+        if "EQUITY_TARGET" in headers:
+            target_index = headers.index("EQUITY_TARGET")
+
+            if len(values) > target_index:
+                state_equity_target = number(values[target_index])
+
+                if state_equity_target > 0:
+                    equity_target = state_equity_target
+
+        if "EQUITY_AVAILABLE" in headers:
+            equity_index = headers.index("EQUITY_AVAILABLE")
 
             if len(values) > equity_index:
-
                 previous_cash = number(
                     values[equity_index],
                     -1,
                 )
 
-                if previous_cash >= 0:
+    # --------------------------------------------------------
+    # Fallback only if PORTFOLIO_STATE has no valid
+    # EQUITY_TARGET yet.
+    # --------------------------------------------------------
 
-                    return {
-                        "TOTAL_CAPITAL": total_capital,
-                        "EQUITY_TARGET": equity_target,
-                        "EQUITY_AVAILABLE": previous_cash,
-                    }
+    if equity_target <= 0:
+        equity_pct = number(
+            config.get("EQUITY_BUCKET_PCT")
+        )
+
+        if equity_pct == 0:
+            equity_pct = number(
+                config.get("EQUITY_PCT"),
+                60,
+            )
+
+        equity_target = (
+            total_capital * equity_pct / 100
+        )
 
     # --------------------------------------------------------
-    # First run / no valid previous state.
+    # Preserve previously saved equity cash.
     # --------------------------------------------------------
+
+    if previous_cash >= 0:
+        equity_available = previous_cash
+    else:
+        equity_available = equity_target
 
     return {
         "TOTAL_CAPITAL": total_capital,
         "EQUITY_TARGET": equity_target,
-        "EQUITY_AVAILABLE": equity_target,
+        "EQUITY_AVAILABLE": equity_available,
     }
 # ============================================================
 # MAIN TRADING ENGINE
@@ -637,12 +657,7 @@ def main():
         )
     )
 
-    total_capital = number(
-        config.get(
-            "TOTAL_CAPITAL",
-            500000,
-        )
-    )
+    total_capital = state["TOTAL_CAPITAL"]
 
     purchase_budget = (
         total_capital
@@ -966,12 +981,7 @@ def main():
     # 8. WRITE PORTFOLIO STATE
     # --------------------------------------------------------
 
-    total_capital = number(
-        config.get(
-            "TOTAL_CAPITAL",
-            500000,
-        )
-    )
+    total_capital = state["TOTAL_CAPITAL"]
 
     liquid_target = (
         total_capital
@@ -995,16 +1005,8 @@ def main():
         / 100
     )
 
-    equity_target = (
-        total_capital
-        * number(
-            config.get(
-                "EQUITY_BUCKET_PCT",
-                60,
-            )
-        )
-        / 100
-    )
+    # EQUITY_TARGET comes from Bucket Engine / PORTFOLIO_STATE.
+    equity_target = state["EQUITY_TARGET"]
 
     equity_value = (
         cash
