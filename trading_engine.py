@@ -171,8 +171,8 @@ def write_positions(sheet, positions):
         return
     sheet.clear()
     sheet.update(
-        f"A1:N{len(rows)}",
-        rows,
+        range_name=f"A1:N{len(rows)}",
+        values=rows,
     )
 
 
@@ -1050,8 +1050,8 @@ def main():
         state_sheet.clear()
 
         state_sheet.update(
-            "A1:L2",
-            state_rows,
+            range_name="A1:L2",
+            values=state_rows,
         )
 
     print("======================================")
