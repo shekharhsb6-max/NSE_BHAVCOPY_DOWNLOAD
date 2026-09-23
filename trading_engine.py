@@ -6,7 +6,9 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_DUPLICATE_BUY = os.environ.get("TEST_DUPLICATE_BUY", "false").lower() == "true"
+TEST_MULTI_AVERAGING = (
+    os.environ.get("TEST_MULTI_AVERAGING", "false").lower() == "true"
+)
 
 
 
@@ -395,6 +397,44 @@ def main():
         positions_sheet
     )
 
+    if DRY_RUN and TEST_MULTI_AVERAGING:
+        positions.extend([
+            {
+                "SYMBOL": "MAHKTECH",
+                "CATEGORY": "TEST",
+                "QUANTITY": 100,
+                "AVG_COST": 21.77,
+                "INVESTED_VALUE": 2177.00,
+                "CURRENT_PRICE": 20.50,
+                "CURRENT_VALUE": 2050.00,
+                "UNREALIZED_PNL": -127.00,
+                "UNREALIZED_PNL_PCT": -5.83,
+                "AVERAGING_BUYS": 0,
+                "LAST_BUY_DATE": "",
+                "TARGET_PRICE": 23.1581,
+                "STATUS": "OPEN",
+            },
+            {
+                "SYMBOL": "ITBEES",
+                "CATEGORY": "TEST",
+                "QUANTITY": 100,
+                "AVG_COST": 30.00,
+                "INVESTED_VALUE": 3000.00,
+                "CURRENT_PRICE": 27.00,
+                "CURRENT_VALUE": 2700.00,
+                "UNREALIZED_PNL": -300.00,
+                "UNREALIZED_PNL_PCT": -10.00,
+                "AVERAGING_BUYS": 0,
+                "LAST_BUY_DATE": "",
+                "TARGET_PRICE": 31.914,
+                "STATUS": "OPEN",
+            },
+        ])
+
+        print("TEST MODE: Simulated two averaging candidates.")
+        print("TEST MODE: MAHKTECH fall = 5.83%; ITBEES fall = 10.00%.")
+        print("TEST MODE: ITBEES should receive averaging priority.")
+
     scanner = read_scanner(
         scanner_sheet
     )
@@ -415,6 +455,16 @@ def main():
         for row in scanner
         if row.get("TRADE_DATE")
     )
+
+    if DRY_RUN and TEST_MULTI_AVERAGING:
+        latest_prices["MAHKTECH"] = {
+            "DATE": trade_date,
+            "CLOSE": 20.50,
+        }
+        latest_prices["ITBEES"] = {
+            "DATE": trade_date,
+            "CLOSE": 27.00,
+        }
 
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
@@ -602,35 +652,6 @@ def main():
 
     ledger_values = ledger_sheet.get_all_values()
 
-    # ------------------------------------------------
-    # TEST MODE: DUPLICATE BUY PROTECTION
-    # ------------------------------------------------
-    # Inject a simulated BUY already recorded for today.
-    # This must block any second BUY/AVERAGE in the same run/day.
-    if DRY_RUN and TEST_DUPLICATE_BUY:
-        ledger_values = list(ledger_values)
-        ledger_values.append([
-            trade_date,
-            "BUY",
-            "MAHKTECH",
-            "TEST",
-            1148,
-            21.77,
-            24991.96,
-            0,
-            21.77,
-            0,
-            0,
-            300000,
-            275008.04,
-            "TEST_EXISTING_BUY",
-            1,
-        ])
-        print(
-            "TEST MODE: Simulated BUY already recorded for "
-            f"{trade_date}."
-        )
-
     if len(ledger_values) >= 2:
 
         ledger_headers = ledger_values[0]
@@ -687,6 +708,12 @@ def main():
     if not buy_done and averaging_candidates:
 
         fall_pct, position = averaging_candidates[0]
+
+        if TEST_MULTI_AVERAGING:
+            print(
+                f"MULTI-AVERAGING TEST: Selected {position['SYMBOL']} "
+                f"with fall of {fall_pct:.2f}%."
+            )
 
         if cash >= 1:
 
