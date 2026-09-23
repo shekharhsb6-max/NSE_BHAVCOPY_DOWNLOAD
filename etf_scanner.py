@@ -272,13 +272,22 @@ def load_history(spreadsheet, category_map: Dict[str, str]) -> pd.DataFrame:
 # STRATEGY ENGINE
 # ---------------------------------------------------------------------------
 
-def calculate_scanner(history: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def calculate_scanner(history: pd.DataFrame, as_of_date=None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if history.empty:
         raise RuntimeError("ETF_HISTORY contains no usable ETF records.")
 
-    latest_date = history["TRADE_DATE"].max()
+    if as_of_date is None:
+        latest_date = history["TRADE_DATE"].max()
+    else:
+        latest_date = pd.to_datetime(as_of_date, errors="coerce")
+        if pd.isna(latest_date):
+            raise RuntimeError(f"Invalid as_of_date: {as_of_date}")
+        latest_date = pd.Timestamp(latest_date).normalize()
 
-    # The latest available session is the signal date.
+    # Backtests must use only information available on or before the signal date.
+    history = history[history["TRADE_DATE"] <= latest_date].copy()
+
+    # The selected session is the signal date.
     signal_df = history[
         history["TRADE_DATE"] == latest_date
     ].copy()
