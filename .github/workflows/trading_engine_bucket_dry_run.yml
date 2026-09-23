@@ -1,0 +1,42 @@
+name: Trading Engine - Bucket Integrated DRY RUN
+
+on:
+  workflow_dispatch:
+
+jobs:
+  trading:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check Google Sheet secrets
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
+            exit 1
+          fi
+
+          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
+            exit 1
+          fi
+
+          echo "Google Sheet credentials are available."
+
+      - name: Run Bucket Integrated Trading Engine - DRY RUN
+        env:
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRY_RUN: "true"
+        run: python trading_engine_bucket_integrated.py
