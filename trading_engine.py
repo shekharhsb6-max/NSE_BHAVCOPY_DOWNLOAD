@@ -6,8 +6,9 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_MULTI_AVERAGING = (
-    os.environ.get("TEST_MULTI_AVERAGING", "false").lower() == "true"
+TEST_INSUFFICIENT_CASH = (
+    os.environ.get("TEST_INSUFFICIENT_CASH", "false").lower()
+    == "true"
 )
 
 
@@ -397,44 +398,6 @@ def main():
         positions_sheet
     )
 
-    if DRY_RUN and TEST_MULTI_AVERAGING:
-        positions.extend([
-            {
-                "SYMBOL": "MAHKTECH",
-                "CATEGORY": "TEST",
-                "QUANTITY": 100,
-                "AVG_COST": 21.77,
-                "INVESTED_VALUE": 2177.00,
-                "CURRENT_PRICE": 20.50,
-                "CURRENT_VALUE": 2050.00,
-                "UNREALIZED_PNL": -127.00,
-                "UNREALIZED_PNL_PCT": -5.83,
-                "AVERAGING_BUYS": 0,
-                "LAST_BUY_DATE": "",
-                "TARGET_PRICE": 23.1581,
-                "STATUS": "OPEN",
-            },
-            {
-                "SYMBOL": "ITBEES",
-                "CATEGORY": "TEST",
-                "QUANTITY": 100,
-                "AVG_COST": 30.00,
-                "INVESTED_VALUE": 3000.00,
-                "CURRENT_PRICE": 27.00,
-                "CURRENT_VALUE": 2700.00,
-                "UNREALIZED_PNL": -300.00,
-                "UNREALIZED_PNL_PCT": -10.00,
-                "AVERAGING_BUYS": 0,
-                "LAST_BUY_DATE": "",
-                "TARGET_PRICE": 31.914,
-                "STATUS": "OPEN",
-            },
-        ])
-
-        print("TEST MODE: Simulated two averaging candidates.")
-        print("TEST MODE: MAHKTECH fall = 5.83%; ITBEES fall = 10.00%.")
-        print("TEST MODE: ITBEES should receive averaging priority.")
-
     scanner = read_scanner(
         scanner_sheet
     )
@@ -450,21 +413,30 @@ def main():
 
     cash = state["EQUITY_AVAILABLE"]
 
+    # --------------------------------------------------------
+    # TEST MODE: INSUFFICIENT CASH / ZERO-QUANTITY SAFETY
+    # --------------------------------------------------------
+    if DRY_RUN and TEST_INSUFFICIENT_CASH:
+        cash = 10.00
+        print(
+            "TEST MODE: Equity cash overridden to ₹10.00 "
+            "for insufficient-cash / zero-quantity test."
+        )
+
     trade_date = max(
         row["TRADE_DATE"]
         for row in scanner
         if row.get("TRADE_DATE")
     )
 
-    if DRY_RUN and TEST_MULTI_AVERAGING:
+    if DRY_RUN and TEST_INSUFFICIENT_CASH:
         latest_prices["MAHKTECH"] = {
             "DATE": trade_date,
-            "CLOSE": 20.50,
+            "CLOSE": 21.77,
         }
-        latest_prices["ITBEES"] = {
-            "DATE": trade_date,
-            "CLOSE": 27.00,
-        }
+        print(
+            "TEST MODE: MAHKTECH test price overridden to ₹21.77."
+        )
 
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
@@ -709,12 +681,6 @@ def main():
 
         fall_pct, position = averaging_candidates[0]
 
-        if TEST_MULTI_AVERAGING:
-            print(
-                f"MULTI-AVERAGING TEST: Selected {position['SYMBOL']} "
-                f"with fall of {fall_pct:.2f}%."
-            )
-
         if cash >= 1:
 
             price = position["CURRENT_PRICE"]
@@ -867,6 +833,13 @@ def main():
                     budget,
                     price,
                 )
+
+                if quantity == 0 and DRY_RUN and TEST_INSUFFICIENT_CASH:
+                    print(
+                        f"INSUFFICIENT-CASH TEST: "
+                        f"Cannot buy {symbol}: cash ₹{cash:.2f} "
+                        f"is below price ₹{price:.2f}; quantity = 0."
+                    )
 
                 if quantity > 0:
 
