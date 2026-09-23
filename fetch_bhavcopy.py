@@ -1409,6 +1409,33 @@ def run_etf_history_backfill(
             continue
 
         etf_raw_df.attrs["trade_date"] = actual_trade_date
+
+        # nselib can return placeholder rows with missing symbols in the
+        # historical delivery file. Never send such rows to the strict OHLC
+        # validator. Keep only rows with a real mapped ETF symbol.
+        symbol_check_col = find_column(etf_raw_df, ["SYMBOL"])
+        if symbol_check_col is None:
+            raise RuntimeError("ETF backfill could not locate SYMBOL column.")
+
+        symbol_clean = (
+            etf_raw_df[symbol_check_col]
+            .astype("string")
+            .str.strip()
+        )
+        valid_symbol_mask = (
+            symbol_clean.notna()
+            & ~symbol_clean.str.lower().isin(["", "nan", "none", "<na>"])
+            & symbol_clean.isin(etf_symbols)
+        )
+        etf_raw_df = etf_raw_df.loc[valid_symbol_mask].copy()
+
+        if etf_raw_df.empty:
+            print(f"No valid mapped ETF rows found for {candidate}.")
+            candidate -= timedelta(days=1)
+            checked += 1
+            continue
+
+        etf_raw_df.attrs["trade_date"] = actual_trade_date
         df = clean_bhavcopy(etf_raw_df, actual_trade_date)
         etf_df = prepare_etf_history_batch(df, category_map)
 
