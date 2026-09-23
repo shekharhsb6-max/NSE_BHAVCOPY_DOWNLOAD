@@ -162,9 +162,9 @@ def main():
     )
 
     all_dates = sorted(history["TRADE_DATE"].dropna().unique())
-    if start_date is not pd.NaT:
+    if pd.notna(start_date):
         all_dates = [d for d in all_dates if d >= start_date]
-    if end_date is not pd.NaT:
+    if pd.notna(end_date):
         all_dates = [d for d in all_dates if d <= end_date]
 
     # A 252-session scanner requires at least 252 sessions available
