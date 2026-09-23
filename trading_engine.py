@@ -6,9 +6,8 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
-TEST_MAX_AVERAGING = (
-    os.environ.get("TEST_MAX_AVERAGING", "false").lower()
-    == "true"
+TEST_EXIT = (
+    os.environ.get("TEST_EXIT", "false").lower() == "true"
 )
 
 
@@ -398,27 +397,30 @@ def main():
         positions_sheet
     )
 
-    if DRY_RUN and TEST_MAX_AVERAGING:
+    # --------------------------------------------------------
+    # TEST MODE: PROFIT-TARGET EXIT
+    # --------------------------------------------------------
+    # Simulate an existing MAHKTECH position above the configured
+    # 6.38% profit target. DRY RUN only.
+    if DRY_RUN and TEST_EXIT:
         positions.append({
             "SYMBOL": "MAHKTECH",
             "CATEGORY": "TEST",
             "QUANTITY": 100,
             "AVG_COST": 21.77,
             "INVESTED_VALUE": 2177.00,
-            "CURRENT_PRICE": 20.50,
-            "CURRENT_VALUE": 2050.00,
-            "UNREALIZED_PNL": -127.00,
-            "UNREALIZED_PNL_PCT": -5.83,
-            "AVERAGING_BUYS": 5,
+            "CURRENT_PRICE": 23.20,
+            "CURRENT_VALUE": 2320.00,
+            "UNREALIZED_PNL": 143.00,
+            "UNREALIZED_PNL_PCT": 6.5687,
+            "AVERAGING_BUYS": 0,
             "LAST_BUY_DATE": "",
-            "TARGET_PRICE": 23.158,
+            "TARGET_PRICE": 23.158126,
             "STATUS": "OPEN",
         })
-
         print(
-            "TEST MODE: Simulated MAHKTECH "
-            "position with AVERAGING_BUYS=5 "
-            "for max-averaging test."
+            "TEST MODE: Simulated MAHKTECH position "
+            "for profit-target EXIT test."
         )
 
     scanner = read_scanner(
@@ -442,11 +444,15 @@ def main():
         if row.get("TRADE_DATE")
     )
 
-    if DRY_RUN and TEST_MAX_AVERAGING:
+    if DRY_RUN and TEST_EXIT:
         latest_prices["MAHKTECH"] = {
             "DATE": trade_date,
-            "CLOSE": 20.50,
+            "CLOSE": 23.20,
         }
+        print(
+            "TEST MODE: MAHKTECH test price overridden "
+            "to ₹23.20."
+        )
 
     # --------------------------------------------------------
     # UPDATE CURRENT PRICES
@@ -558,6 +564,13 @@ def main():
                 position["SYMBOL"]
             )
 
+            if DRY_RUN and TEST_EXIT:
+                print(
+                    f"EXIT TEST: SELL {position['SYMBOL']} "
+                    f"Qty={quantity} Price={price:.2f} "
+                    f"Reason=TARGET_PROFIT"
+                )
+
         else:
 
             remaining_positions.append(
@@ -620,26 +633,6 @@ def main():
         key=lambda x: x[0],
         reverse=True,
     )
-
-    if DRY_RUN and TEST_MAX_AVERAGING:
-        test_position = next(
-            (
-                p for p in positions
-                if p["SYMBOL"] == "MAHKTECH"
-            ),
-            None,
-        )
-
-        if test_position is not None:
-            if test_position["AVERAGING_BUYS"] >= max_averaging:
-                print(
-                    "MAX-AVERAGING TEST: MAHKTECH has "
-                    f"{test_position['AVERAGING_BUYS']} averaging buys; "
-                    f"maximum allowed is {max_averaging}."
-                )
-                print(
-                    "MAX-AVERAGING TEST: MAHKTECH must NOT be averaged."
-                )
 
     # --------------------------------------------------------
     # 3. MAX ONE BUY/AVERAGE PER DAY
@@ -910,7 +903,7 @@ def main():
                             "CURRENT_VALUE": gross_value,
                             "UNREALIZED_PNL": 0,
                             "UNREALIZED_PNL_PCT": 0,
-                            "AVERAGING_BUYS": 5,
+                            "AVERAGING_BUYS": 0,
                             "LAST_BUY_DATE": trade_date,
                             "TARGET_PRICE": (
                                 price
