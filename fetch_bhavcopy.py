@@ -253,6 +253,7 @@ def download_latest_bhavcopy(
 def clean_bhavcopy(
     df: pd.DataFrame,
     trade_date: date,
+    strict_ohlc: bool = True,
 ) -> pd.DataFrame:
 
     # Current nselib names are included explicitly.
@@ -594,10 +595,23 @@ def clean_bhavcopy(
 
     if invalid_ohlc:
         symbols = [str(out.at[idx, "SYMBOL"]) for idx in invalid_ohlc[:10]]
-        raise RuntimeError(
-            "OHLC integrity validation failed after conservative repair for "
-            f"{len(invalid_ohlc)} row(s), symbols={symbols}. "
-            "The affected rows were NOT allowed to continue into the sheet."
+
+        if strict_ohlc:
+            raise RuntimeError(
+                "OHLC integrity validation failed after conservative repair for "
+                f"{len(invalid_ohlc)} row(s), symbols={symbols}. "
+                "The affected rows were NOT allowed to continue into the sheet."
+            )
+
+        # Historical ETF backfill is allowed to discard malformed source rows.
+        # This is safer than letting a corrupt/non-security placeholder row
+        # abort the entire historical session. The live RAW_DATA path remains
+        # strict by using the default strict_ohlc=True.
+        out = out.drop(index=invalid_ohlc).copy()
+        print(
+            "ETF BACKFILL: discarded "
+            f"{len(invalid_ohlc)} invalid OHLC source row(s); "
+            f"sample symbols={symbols}"
         )
 
     if repair_count:
@@ -1436,7 +1450,11 @@ def run_etf_history_backfill(
             continue
 
         etf_raw_df.attrs["trade_date"] = actual_trade_date
-        df = clean_bhavcopy(etf_raw_df, actual_trade_date)
+        df = clean_bhavcopy(
+            etf_raw_df,
+            actual_trade_date,
+            strict_ohlc=False,
+        )
         etf_df = prepare_etf_history_batch(df, category_map)
 
         if not etf_df.empty:
