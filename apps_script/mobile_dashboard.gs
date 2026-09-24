@@ -150,9 +150,9 @@ function onEdit(e) {
   else if (a1 === 'J46') openConfiguration();
   else if (a1 === 'H47') openCapitalManagement();
   else if (a1 === 'J47') recordSelectedSignal();
-  else if (a1 === 'H48') recordDecision_('BUY');
-  else if (a1 === 'J48') recordDecision_('SKIP');
-  else if (a1 === 'H49') recordDecision_('HOLD');
+  else if (a1 === 'H48' || a1 === 'H20') recordDecision_('BUY');
+  else if (a1 === 'J48' || a1 === 'J20') recordDecision_('SKIP');
+  else if (a1 === 'H49' || a1 === 'L20') recordDecision_('HOLD');
 }
 
 function recordSelectedSignal() {
