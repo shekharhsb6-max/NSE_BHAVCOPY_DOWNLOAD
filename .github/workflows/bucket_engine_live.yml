@@ -1,55 +1,11 @@
 name: Bucket Engine - LIVE
 
 on:
-  workflow_run:
-    workflows:
-      - ETF Scanner
-    types:
-      - completed
-
   workflow_dispatch:
 
 jobs:
   bucket-live:
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.head_branch == 'main'
-      )
-
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Check Google Sheet secrets
-        env:
-          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          if [ -z "$GOOGLE_SPREADSHEET_ID" ]; then
-            exit 1
-          fi
-
-          if [ -z "$GOOGLE_SERVICE_ACCOUNT_JSON" ]; then
-            exit 1
-          fi
-
-          echo "Google Sheet credentials are available."
-
-      - name: Run Bucket Engine - LIVE
-        env:
-          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          DRY_RUN: "false"
-        run: python bucket_engine.py
+      - name: Bucket engine disabled
+        run: echo "Bucket Engine is no longer part of the production system."
