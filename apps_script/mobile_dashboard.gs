@@ -37,6 +37,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Open Configuration', 'openConfiguration')
     .addItem('Open Capital Management', 'openCapitalManagement')
+    .addItem('Transfer Between Buckets', 'transferBetweenBuckets')
     .addToUi();
 }
 
@@ -133,9 +134,27 @@ function renderControls_(sh) {
   sh.getRange('G46:G49').setFontWeight('bold');
   sh.getRange('I46:I48').setFontWeight('bold');
 
-  sh.getRange('G51:L54').merge()
-    .setValue('BUY / SKIP / HOLD are decisions only. They are recorded in SIGNAL_DECISIONS. No broker order is placed by this dashboard.')
-    .setWrap(true).setBackground(C.grey).setVerticalAlignment('middle');
+  sh.getRange('G51:L51').merge().setValue('↔  INTER-BUCKET TRANSFER')
+    .setBackground(C.lightBlue).setFontWeight('bold').setFontColor(C.dark);
+
+  sh.getRange('G52:L53').setValues([
+    ['FROM', 'Liquid', 'TO', 'Equity', 'AMOUNT', 0],
+    ['EXECUTE', false, '', '', '', '']
+  ]);
+  const bucketRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['Liquid','Conservative','Equity'], true)
+    .setAllowInvalid(false).build();
+  sh.getRange('H52').setDataValidation(bucketRule);
+  sh.getRange('J52').setDataValidation(bucketRule);
+  sh.getRange('L52').setNumberFormat('₹#,##0.00').setBackground(C.white);
+  sh.getRange('H53').insertCheckboxes();
+  sh.getRange('G52:L53').setBorder(true,true,true,true,true,true,C.border,SpreadsheetApp.BorderStyle.SOLID);
+  sh.getRange('G52:G53').setFontWeight('bold');
+  sh.getRange('I52').setFontWeight('bold');
+  sh.getRange('K52').setFontWeight('bold');
+  sh.getRange('G54:L55').merge()
+    .setValue('Transfers are internal only. Total capital is unchanged. Equity transfers use AVAILABLE EQUITY CASH, not open positions. Withdrawals remain Liquid-only.')
+    .setWrap(true).setBackground(C.grey).setVerticalAlignment('middle').setFontSize(9);
 }
 
 function onEdit(e) {
@@ -153,6 +172,7 @@ function onEdit(e) {
   else if (a1 === 'H48' || a1 === 'H20') recordDecision_('BUY');
   else if (a1 === 'J48' || a1 === 'J20') recordDecision_('SKIP');
   else if (a1 === 'H49' || a1 === 'L20') recordDecision_('HOLD');
+  else if (a1 === 'H53') transferFromDashboard_();
 }
 
 function recordSelectedSignal() {
@@ -195,6 +215,83 @@ function openConfiguration() {
 function openCapitalManagement() {
   const sh = SpreadsheetApp.getActive().getSheetByName(AWN.CAPITAL);
   if (sh) SpreadsheetApp.getActive().setActiveSheet(sh);
+}
+
+function transferBetweenBuckets() {
+  const ss = SpreadsheetApp.getActive();
+  ss.setActiveSheet(ss.getSheetByName(AWN.DASHBOARD));
+  SpreadsheetApp.getUi().alert('Use the FROM, TO and AMOUNT fields in the dashboard, then tick EXECUTE.');
+}
+
+function transferFromDashboard_() {
+  const ss = SpreadsheetApp.getActive();
+  const dash = ss.getSheetByName(AWN.DASHBOARD);
+  const stateSheet = ss.getSheetByName(AWN.STATE);
+  const capitalSheet = ss.getSheetByName(AWN.CAPITAL);
+
+  const from = String(dash.getRange('H52').getValue()).trim();
+  const to = String(dash.getRange('J52').getValue()).trim();
+  const amount = safeNum_(dash.getRange('L52').getValue());
+  dash.getRange('H53').setValue(false);
+
+  const buckets = ['Liquid','Conservative','Equity'];
+  if (!buckets.includes(from) || !buckets.includes(to) || from === to) {
+    dash.getRange('G54:L55').merge().setValue('TRANSFER ERROR: Select two different buckets.')
+      .setBackground('#FDECEC').setFontColor(C.red).setFontWeight('bold');
+    return;
+  }
+  if (!(amount > 0)) {
+    dash.getRange('G54:L55').merge().setValue('TRANSFER ERROR: Enter an amount greater than zero.')
+      .setBackground('#FDECEC').setFontColor(C.red).setFontWeight('bold');
+    return;
+  }
+
+  const state = readKeyValueRow_(stateSheet);
+  const sourceField = from.toUpperCase() + (from === 'Equity' ? '_AVAILABLE' : '_VALUE');
+  const destinationField = to.toUpperCase() + (to === 'Equity' ? '_AVAILABLE' : '_VALUE');
+  const sourceBalance = safeNum_(state[sourceField]);
+
+  if (amount > sourceBalance + 0.0001) {
+    dash.getRange('G54:L55').merge().setValue(
+      'TRANSFER BLOCKED: ' + from + ' available balance is ' + money_(sourceBalance) + '.'
+    ).setBackground('#FDECEC').setFontColor(C.red).setFontWeight('bold');
+    return;
+  }
+
+  const headers = stateSheet.getRange(1,1,1,stateSheet.getLastColumn()).getValues()[0]
+    .map(x => String(x).trim().toUpperCase());
+  const row = stateSheet.getRange(2,1,1,stateSheet.getLastColumn()).getValues()[0];
+  const srcIdx = headers.indexOf(sourceField);
+  const dstIdx = headers.indexOf(destinationField);
+  if (srcIdx < 0 || dstIdx < 0) {
+    dash.getRange('G54:L55').merge().setValue('TRANSFER ERROR: Required PORTFOLIO_STATE fields are missing.')
+      .setBackground('#FDECEC').setFontColor(C.red).setFontWeight('bold');
+    return;
+  }
+
+  row[srcIdx] = sourceBalance - amount;
+  row[dstIdx] = safeNum_(row[dstIdx]) + amount;
+  stateSheet.getRange(2,1,1,stateSheet.getLastColumn()).setValues([row]);
+
+  const capitalHeaders = capitalSheet.getRange(1,1,1,capitalSheet.getLastColumn()).getValues()[0]
+    .map(x => String(x).trim().toUpperCase());
+  const record = new Array(capitalHeaders.length).fill('');
+  const setCol = (name, value) => { const i = capitalHeaders.indexOf(name); if (i >= 0) record[i] = value; };
+  setCol('DATE', new Date());
+  setCol('ACTION', 'TRANSFER');
+  setCol('BUCKET', from.toUpperCase() + '->' + to.toUpperCase());
+  setCol('AMOUNT', amount);
+  setCol('BALANCE_AFTER', safeNum_(row[dstIdx]));
+  setCol('REFERENCE', 'DASHBOARD_TRANSFER');
+  setCol('REMARKS', from + ' to ' + to + ' — internal bucket transfer');
+  capitalSheet.appendRow(record);
+
+  dash.getRange('G54:L55').merge().setValue(
+    'TRANSFER COMPLETED: ' + money_(amount) + ' moved from ' + from + ' to ' + to + '. Total capital unchanged.'
+  ).setBackground(C.lightGreen).setFontColor(C.green).setFontWeight('bold');
+
+  dash.getRange('L52').setValue(0);
+  refreshDashboard();
 }
 
 function setupDecisionSheet_(sh) {
