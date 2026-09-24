@@ -160,6 +160,11 @@ def read_capital_ledger(sheet):
 
     total_capital = 0.0
     transaction_count = 0
+    bucket_movements = {
+        "LIQUID": 0.0,
+        "CONSERVATIVE": 0.0,
+        "EQUITY": 0.0,
+    }
 
     for row in values[1:]:
         if not any(str(x).strip() for x in row):
@@ -181,26 +186,41 @@ def read_capital_ledger(sheet):
             else 0.0
         )
 
-        if bucket != "TOTAL":
+        if bucket == "TOTAL":
+            if action == "WITHDRAWAL":
+                total_capital -= abs(amount)
+            elif action in {
+                "INITIAL_CAPITAL",
+                "ADD_CAPITAL",
+                "DEPOSIT",
+                "CAPITAL_ADDITION",
+            }:
+                total_capital += abs(amount)
+            else:
+                continue
+
+            transaction_count += 1
             continue
 
-        if action == "WITHDRAWAL":
-            total_capital -= abs(amount)
-        elif action in {
-            "INITIAL_CAPITAL",
-            "ADD_CAPITAL",
-            "DEPOSIT",
-            "CAPITAL_ADDITION",
-        }:
-            total_capital += abs(amount)
-        else:
-            # Unknown TOTAL actions are ignored rather than silently
-            # changing capital.
+        # TRANSFER records use BUCKET="FROM->TO". They move existing
+        # capital between buckets and therefore do not change TOTAL_CAPITAL.
+        if action == "TRANSFER" and "->" in bucket:
+            source, destination = [
+                x.strip().upper() for x in bucket.split("->", 1)
+            ]
+            if source in bucket_movements and destination in bucket_movements:
+                value = abs(amount)
+                bucket_movements[source] -= value
+                bucket_movements[destination] += value
+                transaction_count += 1
             continue
 
-        transaction_count += 1
+        # A withdrawal from Liquid changes the Liquid bucket balance.
+        if action == "WITHDRAWAL" and bucket == "LIQUID":
+            bucket_movements["LIQUID"] -= abs(amount)
+            transaction_count += 1
 
-    if transaction_count == 0:
+    if total_capital == 0:
         raise RuntimeError(
             "No recognised TOTAL capital transactions found in "
             "CAPITAL_MANAGEMENT."
@@ -211,7 +231,7 @@ def read_capital_ledger(sheet):
             f"Calculated total capital is negative: {total_capital:.2f}"
         )
 
-    return total_capital, transaction_count
+    return total_capital, transaction_count, bucket_movements
 
 
 def calculate_equity_positions_value(positions):
@@ -257,6 +277,7 @@ def calculate_bucket_state(
     state_sheet,
     total_capital,
     capital_transactions,
+    bucket_movements,
 ):
     liquid_pct = to_float(config.get("LIQUID_BUCKET_PCT"), 18)
     conservative_pct = to_float(
@@ -297,15 +318,15 @@ def calculate_bucket_state(
 
     equity_value = equity_cash + positions_value
 
-    liquid_value = to_float(
-        existing_state.get("LIQUID_VALUE"),
-        liquid_target,
+    liquid_value = liquid_target + bucket_movements.get("LIQUID", 0.0)
+
+    conservative_value = (
+        conservative_target
+        + bucket_movements.get("CONSERVATIVE", 0.0)
     )
 
-    conservative_value = to_float(
-        existing_state.get("CONSERVATIVE_VALUE"),
-        conservative_target,
-    )
+    equity_cash += bucket_movements.get("EQUITY", 0.0)
+    equity_value = equity_cash + positions_value
 
     total_portfolio_value = (
         liquid_value
@@ -433,7 +454,7 @@ def main():
     config = read_key_value_sheet(config_sheet)
     positions = read_positions(positions_sheet)
 
-    total_capital, capital_transactions = read_capital_ledger(
+    total_capital, capital_transactions, bucket_movements = read_capital_ledger(
         capital_sheet
     )
 
@@ -443,6 +464,7 @@ def main():
         state_sheet=state_sheet,
         total_capital=total_capital,
         capital_transactions=capital_transactions,
+        bucket_movements=bucket_movements,
     )
 
     print_state(state)
