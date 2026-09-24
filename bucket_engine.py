@@ -1,42 +1,21 @@
-"""
-3-BUCKET PORTFOLIO ENGINE — CAPITAL MANAGEMENT INTEGRATED
+"""3-BUCKET PORTFOLIO ENGINE — ACTUAL BUCKET VALUE TRACKING
 
-Reads:
-    PORTFOLIO_CONFIG
-    PORTFOLIO_STATE
-    POSITIONS
-    CAPITAL_MANAGEMENT
+SOURCE OF TRUTH
+----------------
+TARGET VALUES come from PORTFOLIO_CONFIG percentages.
 
-The CAPITAL_MANAGEMENT ledger is now the source for TOTAL_CAPITAL.
+ACTUAL VALUES come from:
+1. Latest SET_VALUE row in CAPITAL_MANAGEMENT for LIQUID / CONSERVATIVE.
+2. Latest SET_VALUE row in CAPITAL_MANAGEMENT for EQUITY.
+3. If SET_VALUE rows do not yet exist, the current PORTFOLIO_STATE values are
+   used as the migration baseline and LIVE mode writes those three baseline
+   rows.
 
-Expected CAPITAL_MANAGEMENT columns:
-    DATE
-    ACTION
-    BUCKET
-    AMOUNT
-    BALANCE_AFTER
-    REFERENCE
-    REMARKS
+TRANSFER / WITHDRAWAL / DEPOSIT rows are retained as audit records. The
+control center writes a SET_VALUE snapshot for affected buckets so repeated
+Bucket Engine runs do not replay the same movement.
 
-For total-capital movements, use BUCKET = TOTAL:
-    INITIAL_CAPITAL
-    ADD_CAPITAL
-    WITHDRAWAL
-
-AMOUNT convention:
-    additions are positive
-    withdrawals are negative
-
-BALANCE_AFTER is retained for user visibility/audit but is not used
-as the source of truth; the engine calculates total capital from the ledger.
-
-This version:
-- Calculates 18% Liquid / 22% Conservative / 60% Equity.
-- Reads existing equity cash and open positions.
-- Does NOT move money between buckets.
-- Does NOT place broker orders.
-- Does NOT modify CAPITAL_MANAGEMENT.
-- Updates PORTFOLIO_STATE only when DRY_RUN=false.
+The engine does not place broker orders.
 """
 
 import json
@@ -45,7 +24,6 @@ from datetime import datetime
 
 import gspread
 from google.oauth2.service_account import Credentials
-
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -57,6 +35,8 @@ STATE_SHEET = "PORTFOLIO_STATE"
 POSITIONS_SHEET = "POSITIONS"
 CAPITAL_SHEET = "CAPITAL_MANAGEMENT"
 
+BUCKETS = ("LIQUID", "CONSERVATIVE", "EQUITY")
+
 
 def to_float(value, default=0.0):
     try:
@@ -67,324 +47,207 @@ def to_float(value, default=0.0):
         return default
 
 
-def to_int(value, default=0):
-    try:
-        return int(float(value))
-    except (ValueError, TypeError):
-        return default
-
-
 def get_google_client():
     spreadsheet_id = os.environ.get("GOOGLE_SPREADSHEET_ID", "").strip()
     credentials_json = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
     if not spreadsheet_id:
         raise RuntimeError("GOOGLE_SPREADSHEET_ID is missing.")
-
     if not credentials_json:
         raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is missing.")
 
-    credentials_info = json.loads(credentials_json)
     credentials = Credentials.from_service_account_info(
-        credentials_info,
+        json.loads(credentials_json),
         scopes=SCOPES,
     )
-
     return gspread.authorize(credentials).open_by_key(spreadsheet_id)
 
 
 def read_key_value_sheet(sheet):
     values = sheet.get_all_values()
-
-    if not values:
-        return {}
-
     result = {}
     for row in values[1:]:
         if len(row) < 2:
             continue
-
         key = str(row[0]).strip()
-        value = row[1]
-
         if key:
-            result[key] = value
-
+            result[key] = row[1]
     return result
+
+
+def read_state(sheet):
+    values = sheet.get_all_values()
+    if len(values) < 2:
+        return {}
+    headers = [str(x).strip().upper() for x in values[0]]
+    row = values[1]
+    return {
+        header: row[i] if i < len(row) else ""
+        for i, header in enumerate(headers)
+    }
 
 
 def read_positions(sheet):
     values = sheet.get_all_values()
-
     if len(values) < 2:
         return []
 
-    headers = [str(x).strip() for x in values[0]]
+    headers = [str(x).strip().upper() for x in values[0]]
     positions = []
 
     for row in values[1:]:
         if not any(str(x).strip() for x in row):
             continue
-
-        item = {}
-        for i, header in enumerate(headers):
-            item[header] = row[i] if i < len(row) else ""
-
+        item = {
+            headers[i]: row[i] if i < len(row) else ""
+            for i in range(len(headers))
+        }
         positions.append(item)
 
     return positions
 
 
+def positions_value(positions):
+    total = 0.0
+    for p in positions:
+        status = str(p.get("STATUS", "")).strip().upper()
+        if status and status != "OPEN":
+            continue
+        qty = to_float(p.get("QUANTITY"))
+        price = to_float(p.get("CURRENT_PRICE"))
+        current = to_float(p.get("CURRENT_VALUE"))
+        if current == 0 and qty > 0 and price > 0:
+            current = qty * price
+        total += current
+    return total
+
+
 def read_capital_ledger(sheet):
     values = sheet.get_all_values()
-
-    if len(values) < 2:
-        raise RuntimeError(
-            "CAPITAL_MANAGEMENT has no transaction rows."
-        )
+    if not values:
+        raise RuntimeError("CAPITAL_MANAGEMENT is empty.")
 
     headers = [str(x).strip().upper() for x in values[0]]
-
     required = {"ACTION", "BUCKET", "AMOUNT"}
     missing = required - set(headers)
-
     if missing:
         raise RuntimeError(
             "CAPITAL_MANAGEMENT is missing required columns: "
             + ", ".join(sorted(missing))
         )
 
-    action_index = headers.index("ACTION")
-    bucket_index = headers.index("BUCKET")
-    amount_index = headers.index("AMOUNT")
+    ai = headers.index("ACTION")
+    bi = headers.index("BUCKET")
+    mi = headers.index("AMOUNT")
 
+    rows = []
     total_capital = 0.0
-    transaction_count = 0
 
-    for row in values[1:]:
+    for row_number, row in enumerate(values[1:], start=2):
         if not any(str(x).strip() for x in row):
             continue
 
-        action = (
-            str(row[action_index]).strip().upper()
-            if action_index < len(row)
-            else ""
-        )
-        bucket = (
-            str(row[bucket_index]).strip().upper()
-            if bucket_index < len(row)
-            else ""
-        )
-        amount = (
-            to_float(row[amount_index])
-            if amount_index < len(row)
-            else 0.0
-        )
+        action = str(row[ai] if ai < len(row) else "").strip().upper()
+        bucket = str(row[bi] if bi < len(row) else "").strip().upper()
+        amount = to_float(row[mi] if mi < len(row) else "")
 
-        if bucket != "TOTAL":
-            continue
+        rows.append({
+            "ROW": row_number,
+            "ACTION": action,
+            "BUCKET": bucket,
+            "AMOUNT": amount,
+        })
 
-        if action == "WITHDRAWAL":
-            total_capital -= abs(amount)
-        elif action in {
-            "INITIAL_CAPITAL",
-            "ADD_CAPITAL",
-            "DEPOSIT",
-            "CAPITAL_ADDITION",
-        }:
-            total_capital += abs(amount)
-        else:
-            # Unknown TOTAL actions are ignored rather than silently
-            # changing capital.
-            continue
-
-        transaction_count += 1
-
-    if transaction_count == 0:
-        raise RuntimeError(
-            "No recognised TOTAL capital transactions found in "
-            "CAPITAL_MANAGEMENT."
-        )
+        if bucket == "TOTAL":
+            if action in {
+                "INITIAL_CAPITAL",
+                "ADD_CAPITAL",
+                "DEPOSIT",
+                "CAPITAL_ADDITION",
+            }:
+                total_capital += abs(amount)
+            elif action == "WITHDRAWAL":
+                total_capital -= abs(amount)
 
     if total_capital < 0:
         raise RuntimeError(
-            f"Calculated total capital is negative: {total_capital:.2f}"
+            f"Calculated TOTAL_CAPITAL is negative: {total_capital:.2f}"
         )
 
-    return total_capital, transaction_count
+    return rows, total_capital
 
-def calculate_equity_positions_value(positions):
-    total = 0.0
 
-    for position in positions:
-        status = str(position.get("STATUS", "")).strip().upper()
+def latest_bucket_values(rows):
+    latest = {}
+    latest_row = {}
 
-        if status and status != "OPEN":
+    for item in rows:
+        bucket = item["BUCKET"]
+        if bucket not in BUCKETS:
             continue
+        if item["ACTION"] in {"SET_VALUE", "BUCKET_VALUE"}:
+            latest[bucket] = item["AMOUNT"]
+            latest_row[bucket] = item["ROW"]
 
-        current_value = to_float(position.get("CURRENT_VALUE"))
-
-        if current_value == 0:
-            quantity = to_int(position.get("QUANTITY"))
-            current_price = to_float(position.get("CURRENT_PRICE"))
-            current_value = quantity * current_price
-
-        total += current_value
-
-    return total
+    return latest, latest_row
 
 
-def read_existing_state(state_sheet):
-    values = state_sheet.get_all_values()
+def append_baseline_rows(capital_sheet, current):
+    today = datetime.now().strftime("%Y-%m-%d")
+    rows = [
+        [
+            today,
+            "SET_VALUE",
+            bucket,
+            current[bucket],
+            current[bucket],
+            "BUCKET_ENGINE_MIGRATION",
+            "Opening actual bucket value",
+        ]
+        for bucket in BUCKETS
+    ]
+    capital_sheet.append_rows(
+        rows,
+        value_input_option="USER_ENTERED",
+    )
 
-    if len(values) < 2:
-        return {}
 
-    headers = [str(x).strip().upper() for x in values[0]]
-    row = values[1]
+def apply_bucket_movements(rows, values, latest_rows):
+    """
+    Apply movement rows that occurred after each bucket's latest SET_VALUE.
+    This makes SET_VALUE a snapshot/checkpoint and prevents replay.
+    """
+    result = dict(values)
 
-    result = {}
-    for i, header in enumerate(headers):
-        result[header] = row[i] if i < len(row) else ""
+    for item in rows:
+        action = item["ACTION"]
+        bucket = item["BUCKET"]
+        row_number = item["ROW"]
+        amount = item["AMOUNT"]
+
+        if action == "TRANSFER" and "->" in bucket:
+            from_bucket, to_bucket = [
+                x.strip().upper() for x in bucket.split("->", 1)
+            ]
+            if from_bucket not in BUCKETS or to_bucket not in BUCKETS:
+                continue
+
+            if row_number > latest_rows.get(from_bucket, 0):
+                result[from_bucket] -= abs(amount)
+            if row_number > latest_rows.get(to_bucket, 0):
+                result[to_bucket] += abs(amount)
+
+        elif action in {"WITHDRAWAL", "DEPOSIT", "ADD_CAPITAL"}:
+            if bucket in BUCKETS and row_number > latest_rows.get(bucket, 0):
+                if action == "WITHDRAWAL":
+                    result[bucket] -= abs(amount)
+                else:
+                    result[bucket] += abs(amount)
 
     return result
 
 
-def calculate_bucket_state(
-    config,
-    positions,
-    state_sheet,
-    total_capital,
-    capital_transactions,
-):
-    liquid_pct = to_float(config.get("LIQUID_BUCKET_PCT"), 18)
-    conservative_pct = to_float(
-        config.get("CONSERVATIVE_BUCKET_PCT"),
-        22,
-    )
-    equity_pct = to_float(config.get("EQUITY_BUCKET_PCT"), 60)
-
-    pct_total = liquid_pct + conservative_pct + equity_pct
-
-    if abs(pct_total - 100.0) > 0.0001:
-        raise ValueError(
-            f"Bucket percentages must total 100%. "
-            f"Current total={pct_total:.4f}%."
-        )
-
-    liquid_target = total_capital * liquid_pct / 100.0
-    conservative_target = total_capital * conservative_pct / 100.0
-    equity_target = total_capital * equity_pct / 100.0
-
-    positions_value = calculate_equity_positions_value(positions)
-
-    existing_state = read_existing_state(state_sheet)
-
-    # Existing equity cash remains authoritative until the capital allocation
-    # and transfer/rebalancing layer is implemented.
-    equity_cash = to_float(
-        existing_state.get("EQUITY_AVAILABLE"),
-        0.0,
-    )
-
-    if (
-        equity_cash == 0
-        and positions_value == 0
-        and not existing_state
-    ):
-        equity_cash = equity_target
-
-    equity_value = equity_cash + positions_value
-
-    liquid_value = to_float(
-        existing_state.get("LIQUID_VALUE"),
-        liquid_target,
-    )
-
-    conservative_value = to_float(
-        existing_state.get("CONSERVATIVE_VALUE"),
-        conservative_target,
-    )
-
-    total_portfolio_value = (
-        liquid_value
-        + conservative_value
-        + equity_value
-    )
-
-    total_portfolio_value = (
-        liquid_value
-        + conservative_value
-        + equity_value
-    )
-
-    return {
-        "AS_OF_DATE": datetime.now().strftime("%Y-%m-%d"),
-        "TOTAL_CAPITAL": total_capital,
-        "LIQUID_TARGET": liquid_target,
-        "CONSERVATIVE_TARGET": conservative_target,
-        "EQUITY_TARGET": equity_target,
-        "LIQUID_VALUE": liquid_value,
-        "CONSERVATIVE_VALUE": conservative_value,
-        "EQUITY_AVAILABLE": equity_cash,
-        "POSITIONS_VALUE": positions_value,
-        "EQUITY_VALUE": equity_value,
-        "TOTAL_PORTFOLIO_VALUE": total_portfolio_value,
-        "CASH_RESERVE": equity_cash,
-        "LIQUID_DEVIATION": liquid_value - liquid_target,
-        "CONSERVATIVE_DEVIATION": (
-            conservative_value - conservative_target
-        ),
-        "EQUITY_DEVIATION": equity_value - equity_target,
-        "CAPITAL_TRANSACTIONS": capital_transactions,
-    }
-
-
-def print_state(state):
-    print("======================================")
-    print("3-BUCKET ENGINE")
-    print("======================================")
-    print(f"TOTAL_CAPITAL: {state['TOTAL_CAPITAL']:.2f}")
-    print(f"LIQUID_TARGET: {state['LIQUID_TARGET']:.2f}")
-    print(f"LIQUID_VALUE: {state['LIQUID_VALUE']:.2f}")
-    print(
-        f"LIQUID_DEVIATION: "
-        f"{state['LIQUID_DEVIATION']:.2f}"
-    )
-    print(
-        f"CONSERVATIVE_TARGET: "
-        f"{state['CONSERVATIVE_TARGET']:.2f}"
-    )
-    print(
-        f"CONSERVATIVE_VALUE: "
-        f"{state['CONSERVATIVE_VALUE']:.2f}"
-    )
-    print(
-        f"CONSERVATIVE_DEVIATION: "
-        f"{state['CONSERVATIVE_DEVIATION']:.2f}"
-    )
-    print(f"EQUITY_TARGET: {state['EQUITY_TARGET']:.2f}")
-    print(
-        f"EQUITY_AVAILABLE: "
-        f"{state['EQUITY_AVAILABLE']:.2f}"
-    )
-    print(
-        f"POSITIONS_VALUE: "
-        f"{state['POSITIONS_VALUE']:.2f}"
-    )
-    print(f"EQUITY_VALUE: {state['EQUITY_VALUE']:.2f}")
-    print(
-        f"EQUITY_DEVIATION: "
-        f"{state['EQUITY_DEVIATION']:.2f}"
-    )
-    print(
-        f"TOTAL_PORTFOLIO_VALUE: "
-        f"{state['TOTAL_PORTFOLIO_VALUE']:.2f}"
-    )
-    print("======================================")
-
-
-def update_state_sheet(sheet, state):
+def write_state(sheet, state):
     rows = [
         [
             "AS_OF_DATE",
@@ -394,9 +257,9 @@ def update_state_sheet(sheet, state):
             "EQUITY_TARGET",
             "LIQUID_VALUE",
             "CONSERVATIVE_VALUE",
+            "EQUITY_VALUE",
             "EQUITY_AVAILABLE",
             "POSITIONS_VALUE",
-            "EQUITY_VALUE",
             "TOTAL_PORTFOLIO_VALUE",
             "CASH_RESERVE",
         ],
@@ -408,70 +271,153 @@ def update_state_sheet(sheet, state):
             state["EQUITY_TARGET"],
             state["LIQUID_VALUE"],
             state["CONSERVATIVE_VALUE"],
+            state["EQUITY_VALUE"],
             state["EQUITY_AVAILABLE"],
             state["POSITIONS_VALUE"],
-            state["EQUITY_VALUE"],
             state["TOTAL_PORTFOLIO_VALUE"],
             state["CASH_RESERVE"],
         ],
     ]
-
-    sheet.update(
-        range_name="A1:L2",
-        values=rows,
-    )
+    sheet.update(range_name="A1:L2", values=rows)
 
 
 def main():
-    dry_run = (
-        os.environ.get("DRY_RUN", "true").strip().lower()
-        == "true"
-    )
+    dry_run = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
 
     spreadsheet = get_google_client()
-
     config_sheet = spreadsheet.worksheet(CONFIG_SHEET)
     state_sheet = spreadsheet.worksheet(STATE_SHEET)
     positions_sheet = spreadsheet.worksheet(POSITIONS_SHEET)
     capital_sheet = spreadsheet.worksheet(CAPITAL_SHEET)
 
     config = read_key_value_sheet(config_sheet)
+    existing_state = read_state(state_sheet)
     positions = read_positions(positions_sheet)
 
-    total_capital, capital_transactions, bucket_movements = read_capital_ledger(
-        capital_sheet
+    rows, total_capital = read_capital_ledger(capital_sheet)
+
+    if total_capital <= 0:
+        total_capital = to_float(
+            config.get("TOTAL_CAPITAL"),
+            500000,
+        )
+
+    liquid_pct = to_float(config.get("LIQUID_BUCKET_PCT"), 18)
+    conservative_pct = to_float(
+        config.get("CONSERVATIVE_BUCKET_PCT"), 22
+    )
+    equity_pct = to_float(config.get("EQUITY_BUCKET_PCT"), 60)
+
+    pct_total = liquid_pct + conservative_pct + equity_pct
+    if abs(pct_total - 100.0) > 0.0001:
+        raise ValueError(
+            f"Bucket percentages must total 100%. Current total={pct_total:.4f}%."
+        )
+
+    targets = {
+        "LIQUID": total_capital * liquid_pct / 100.0,
+        "CONSERVATIVE": total_capital * conservative_pct / 100.0,
+        "EQUITY": total_capital * equity_pct / 100.0,
+    }
+
+    actuals, latest_rows = latest_bucket_values(rows)
+
+    # One-time migration: establish actual bucket values from the current
+    # PORTFOLIO_STATE. This does not change the current values.
+    if not actuals:
+        actuals = {
+            "LIQUID": to_float(
+                existing_state.get("LIQUID_VALUE"),
+                targets["LIQUID"],
+            ),
+            "CONSERVATIVE": to_float(
+                existing_state.get("CONSERVATIVE_VALUE"),
+                targets["CONSERVATIVE"],
+            ),
+            "EQUITY": to_float(
+                existing_state.get("EQUITY_VALUE"),
+                to_float(
+                    existing_state.get("EQUITY_AVAILABLE"),
+                    targets["EQUITY"],
+                ) + positions_value(positions),
+            ),
+        }
+
+        if not dry_run:
+            append_baseline_rows(capital_sheet, actuals)
+            rows, _ = read_capital_ledger(capital_sheet)
+            actuals, latest_rows = latest_bucket_values(rows)
+
+    # If only some buckets have checkpoints, use their current state values
+    # for the missing buckets.
+    for bucket in BUCKETS:
+        if bucket not in actuals:
+            actuals[bucket] = to_float(
+                existing_state.get(bucket + "_VALUE"),
+                targets[bucket],
+            )
+            latest_rows[bucket] = 0
+
+    actuals = apply_bucket_movements(rows, actuals, latest_rows)
+
+    pos_value = positions_value(positions)
+
+    # Equity cash is the available equity amount maintained by the Trading
+    # Engine / Mobile Control Center. Equity bucket value is cash + positions.
+    equity_cash = to_float(
+        existing_state.get("EQUITY_AVAILABLE"),
+        max(0.0, actuals["EQUITY"] - pos_value),
     )
 
-    state = calculate_bucket_state(
-        config=config,
-        positions=positions,
-        state_sheet=state_sheet,
-        total_capital=total_capital,
-        capital_transactions=capital_transactions,
-    )
+    # If an equity SET_VALUE checkpoint exists, use it as the current bucket
+    # value. Otherwise derive it from the current trading state.
+    if "EQUITY" in latest_rows and latest_rows["EQUITY"] > 0:
+        equity_value = actuals["EQUITY"]
+        equity_cash = max(0.0, equity_value - pos_value)
+    else:
+        equity_value = equity_cash + pos_value
+        actuals["EQUITY"] = equity_value
 
-    print_state(state)
+    state = {
+        "AS_OF_DATE": datetime.now().strftime("%Y-%m-%d"),
+        "TOTAL_CAPITAL": total_capital,
+        "LIQUID_TARGET": targets["LIQUID"],
+        "CONSERVATIVE_TARGET": targets["CONSERVATIVE"],
+        "EQUITY_TARGET": targets["EQUITY"],
+        "LIQUID_VALUE": actuals["LIQUID"],
+        "CONSERVATIVE_VALUE": actuals["CONSERVATIVE"],
+        "EQUITY_VALUE": equity_value,
+        "EQUITY_AVAILABLE": equity_cash,
+        "POSITIONS_VALUE": pos_value,
+        "TOTAL_PORTFOLIO_VALUE": (
+            actuals["LIQUID"]
+            + actuals["CONSERVATIVE"]
+            + equity_value
+        ),
+        "CASH_RESERVE": equity_cash,
+    }
 
-    print(
-        f"CAPITAL_TRANSACTIONS: "
-        f"{capital_transactions}"
-    )
+    print("======================================")
+    print("3-BUCKET ENGINE — ACTUAL VALUES")
+    print("======================================")
+    print(f"TOTAL_CAPITAL: {total_capital:.2f}")
+    for bucket in BUCKETS:
+        print(f"{bucket}_TARGET: {targets[bucket]:.2f}")
+        print(f"{bucket}_VALUE: {state[bucket + '_VALUE']:.2f}")
+        print(
+            f"{bucket}_DEVIATION: "
+            f"{state[bucket + '_VALUE'] - targets[bucket]:.2f}"
+        )
+    print(f"POSITIONS_VALUE: {pos_value:.2f}")
+    print(f"TOTAL_PORTFOLIO_VALUE: {state['TOTAL_PORTFOLIO_VALUE']:.2f}")
+    print("======================================")
 
     if dry_run:
-        print("")
-        print(
-            "DRY RUN: PORTFOLIO_STATE "
-            "will NOT be modified."
-        )
+        print("DRY RUN: PORTFOLIO_STATE will NOT be modified.")
     else:
-        update_state_sheet(state_sheet, state)
-        print("")
-        print(
-            "LIVE: PORTFOLIO_STATE "
-            "updated successfully."
-        )
+        write_state(state_sheet, state)
+        print("LIVE: PORTFOLIO_STATE updated successfully.")
 
-    print("")
     print("BUCKET ENGINE COMPLETED")
 
 
