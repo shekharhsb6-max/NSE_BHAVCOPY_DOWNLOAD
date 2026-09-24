@@ -1176,6 +1176,43 @@ def _safe_sheet_rows(df: pd.DataFrame) -> list[list]:
     return rows
 
 
+def sort_etf_history(worksheet) -> None:
+    """Sort ETF_HISTORY newest-first by trade date, then symbol."""
+    last_row = worksheet.row_count
+    if last_row <= 2:
+        return
+
+    worksheet.spreadsheet.batch_update({
+        "requests": [
+            {
+                "sortRange": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 1,
+                        "endRowIndex": last_row,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": 9,
+                    },
+                    "sortSpecs": [
+                        {
+                            "dimensionIndex": 0,
+                            "sortOrder": "DESCENDING",
+                        },
+                        {
+                            "dimensionIndex": 1,
+                            "sortOrder": "ASCENDING",
+                        },
+                    ],
+                }
+            }
+        ]
+    })
+
+    print(
+        "ETF_HISTORY sorted: TRADE_DATE descending, SYMBOL ascending."
+    )
+
+
 def write_etf_history_date_batch(
     spreadsheet,
     worksheet,
@@ -1230,6 +1267,8 @@ def write_etf_history_date_batch(
             value_input_option="USER_ENTERED",
         )
 
+        sort_etf_history(worksheet)
+
         print(
             f"ETF_HISTORY: replaced {source_date} "
             f"with {len(rows)} ETF rows."
@@ -1260,10 +1299,13 @@ def write_etf_history_date_batch(
         value_input_option="USER_ENTERED",
     )
 
+    sort_etf_history(worksheet)
+
     print(
         f"ETF_HISTORY: appended {len(rows)} ETF rows "
         f"for {source_date}."
     )
+
 
 
 def run_etf_history_backfill(
