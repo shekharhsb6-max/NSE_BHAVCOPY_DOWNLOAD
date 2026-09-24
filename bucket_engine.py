@@ -1,21 +1,11 @@
-"""3-BUCKET PORTFOLIO ENGINE — ACTUAL BUCKET VALUE TRACKING
+"""Simple 3-bucket portfolio engine.
 
-SOURCE OF TRUTH
-----------------
-TARGET VALUES come from PORTFOLIO_CONFIG percentages.
+Targets come from PORTFOLIO_CONFIG.
+Actual Liquid and Conservative values come from BUCKET_VALUES.
+Actual Equity value is calculated as Equity Cash + Open Positions.
 
-ACTUAL VALUES come from:
-1. Latest SET_VALUE row in CAPITAL_MANAGEMENT for LIQUID / CONSERVATIVE.
-2. Latest SET_VALUE row in CAPITAL_MANAGEMENT for EQUITY.
-3. If SET_VALUE rows do not yet exist, the current PORTFOLIO_STATE values are
-   used as the migration baseline and LIVE mode writes those three baseline
-   rows.
-
-TRANSFER / WITHDRAWAL / DEPOSIT rows are retained as audit records. The
-control center writes a SET_VALUE snapshot for affected buckets so repeated
-Bucket Engine runs do not replay the same movement.
-
-The engine does not place broker orders.
+BUCKET_VALUES is the simple user-editable source for non-equity buckets.
+PORTFOLIO_STATE is output only.
 """
 
 import json
@@ -34,6 +24,7 @@ CONFIG_SHEET = "PORTFOLIO_CONFIG"
 STATE_SHEET = "PORTFOLIO_STATE"
 POSITIONS_SHEET = "POSITIONS"
 CAPITAL_SHEET = "CAPITAL_MANAGEMENT"
+BUCKET_VALUES_SHEET = "BUCKET_VALUES"
 
 BUCKETS = ("LIQUID", "CONSERVATIVE", "EQUITY")
 
@@ -98,12 +89,10 @@ def read_positions(sheet):
     for row in values[1:]:
         if not any(str(x).strip() for x in row):
             continue
-        item = {
+        positions.append({
             headers[i]: row[i] if i < len(row) else ""
             for i in range(len(headers))
-        }
-        positions.append(item)
-
+        })
     return positions
 
 
@@ -113,138 +102,120 @@ def positions_value(positions):
         status = str(p.get("STATUS", "")).strip().upper()
         if status and status != "OPEN":
             continue
+
         qty = to_float(p.get("QUANTITY"))
         price = to_float(p.get("CURRENT_PRICE"))
         current = to_float(p.get("CURRENT_VALUE"))
+
         if current == 0 and qty > 0 and price > 0:
             current = qty * price
+
         total += current
+
     return total
 
 
-def read_capital_ledger(sheet):
+def read_total_capital(sheet, fallback):
     values = sheet.get_all_values()
     if not values:
-        raise RuntimeError("CAPITAL_MANAGEMENT is empty.")
+        return fallback
 
     headers = [str(x).strip().upper() for x in values[0]]
     required = {"ACTION", "BUCKET", "AMOUNT"}
-    missing = required - set(headers)
-    if missing:
-        raise RuntimeError(
-            "CAPITAL_MANAGEMENT is missing required columns: "
-            + ", ".join(sorted(missing))
-        )
+    if not required.issubset(set(headers)):
+        return fallback
 
     ai = headers.index("ACTION")
     bi = headers.index("BUCKET")
     mi = headers.index("AMOUNT")
 
-    rows = []
-    total_capital = 0.0
+    total = 0.0
 
-    for row_number, row in enumerate(values[1:], start=2):
-        if not any(str(x).strip() for x in row):
-            continue
-
+    for row in values[1:]:
         action = str(row[ai] if ai < len(row) else "").strip().upper()
         bucket = str(row[bi] if bi < len(row) else "").strip().upper()
         amount = to_float(row[mi] if mi < len(row) else "")
 
-        rows.append({
-            "ROW": row_number,
-            "ACTION": action,
-            "BUCKET": bucket,
-            "AMOUNT": amount,
-        })
+        if bucket != "TOTAL":
+            continue
 
-        if bucket == "TOTAL":
-            if action in {
-                "INITIAL_CAPITAL",
-                "ADD_CAPITAL",
-                "DEPOSIT",
-                "CAPITAL_ADDITION",
-            }:
-                total_capital += abs(amount)
-            elif action == "WITHDRAWAL":
-                total_capital -= abs(amount)
+        if action in {
+            "INITIAL_CAPITAL",
+            "ADD_CAPITAL",
+            "DEPOSIT",
+            "CAPITAL_ADDITION",
+        }:
+            total += abs(amount)
+        elif action == "WITHDRAWAL":
+            total -= abs(amount)
 
-    if total_capital < 0:
-        raise RuntimeError(
-            f"Calculated TOTAL_CAPITAL is negative: {total_capital:.2f}"
+    return total if total > 0 else fallback
+
+
+def ensure_bucket_values_sheet(spreadsheet, state, targets):
+    try:
+        sheet = spreadsheet.worksheet(BUCKET_VALUES_SHEET)
+        return sheet
+    except gspread.WorksheetNotFound:
+        sheet = spreadsheet.add_worksheet(
+            title=BUCKET_VALUES_SHEET,
+            rows=10,
+            cols=4,
         )
 
-    return rows, total_capital
+        liquid = to_float(state.get("LIQUID_VALUE"), targets["LIQUID"])
+        conservative = to_float(
+            state.get("CONSERVATIVE_VALUE"),
+            targets["CONSERVATIVE"],
+        )
+
+        sheet.update(
+            range_name="A1:D4",
+            values=[
+                ["BUCKET", "ACTUAL_VALUE", "MODE", "REMARKS"],
+                ["LIQUID", liquid, "MANUAL", "Enter current actual value"],
+                ["CONSERVATIVE", conservative, "MANUAL", "Enter current actual value"],
+                ["EQUITY", "", "AUTO", "Calculated from equity cash + open positions"],
+            ],
+        )
+        return sheet
 
 
-def latest_bucket_values(rows):
-    latest = {}
-    latest_row = {}
+def read_bucket_values(sheet, state, targets):
+    values = sheet.get_all_values()
+    actual = {}
 
-    for item in rows:
-        bucket = item["BUCKET"]
-        if bucket not in BUCKETS:
-            continue
-        if item["ACTION"] in {"SET_VALUE", "BUCKET_VALUE"}:
-            latest[bucket] = item["AMOUNT"]
-            latest_row[bucket] = item["ROW"]
+    if len(values) >= 2:
+        headers = [str(x).strip().upper() for x in values[0]]
+        if "BUCKET" not in headers or "ACTUAL_VALUE" not in headers:
+            raise RuntimeError(
+                "BUCKET_VALUES must contain BUCKET and ACTUAL_VALUE columns."
+            )
 
-    return latest, latest_row
+        bi = headers.index("BUCKET")
+        vi = headers.index("ACTUAL_VALUE")
 
+        for row in values[1:]:
+            bucket = str(row[bi] if bi < len(row) else "").strip().upper()
+            if bucket in BUCKETS:
+                actual[bucket] = to_float(
+                    row[vi] if vi < len(row) else "",
+                    0.0,
+                )
 
-def append_baseline_rows(capital_sheet, current):
-    today = datetime.now().strftime("%Y-%m-%d")
-    rows = [
-        [
-            today,
-            "SET_VALUE",
-            bucket,
-            current[bucket],
-            current[bucket],
-            "BUCKET_ENGINE_MIGRATION",
-            "Opening actual bucket value",
-        ]
-        for bucket in BUCKETS
-    ]
-    capital_sheet.append_rows(
-        rows,
-        value_input_option="USER_ENTERED",
-    )
+    if "LIQUID" not in actual:
+        actual["LIQUID"] = to_float(
+            state.get("LIQUID_VALUE"),
+            targets["LIQUID"],
+        )
 
+    if "CONSERVATIVE" not in actual:
+        actual["CONSERVATIVE"] = to_float(
+            state.get("CONSERVATIVE_VALUE"),
+            targets["CONSERVATIVE"],
+        )
 
-def apply_bucket_movements(rows, values, latest_rows):
-    """
-    Apply movement rows that occurred after each bucket's latest SET_VALUE.
-    This makes SET_VALUE a snapshot/checkpoint and prevents replay.
-    """
-    result = dict(values)
-
-    for item in rows:
-        action = item["ACTION"]
-        bucket = item["BUCKET"]
-        row_number = item["ROW"]
-        amount = item["AMOUNT"]
-
-        if action == "TRANSFER" and "->" in bucket:
-            from_bucket, to_bucket = [
-                x.strip().upper() for x in bucket.split("->", 1)
-            ]
-            if from_bucket not in BUCKETS or to_bucket not in BUCKETS:
-                continue
-
-            if row_number > latest_rows.get(from_bucket, 0):
-                result[from_bucket] -= abs(amount)
-            if row_number > latest_rows.get(to_bucket, 0):
-                result[to_bucket] += abs(amount)
-
-        elif action in {"WITHDRAWAL", "DEPOSIT", "ADD_CAPITAL"}:
-            if bucket in BUCKETS and row_number > latest_rows.get(bucket, 0):
-                if action == "WITHDRAWAL":
-                    result[bucket] -= abs(amount)
-                else:
-                    result[bucket] += abs(amount)
-
-    return result
+    return actual
 
 
 def write_state(sheet, state):
@@ -285,6 +256,7 @@ def main():
     dry_run = os.environ.get("DRY_RUN", "true").strip().lower() == "true"
 
     spreadsheet = get_google_client()
+
     config_sheet = spreadsheet.worksheet(CONFIG_SHEET)
     state_sheet = spreadsheet.worksheet(STATE_SHEET)
     positions_sheet = spreadsheet.worksheet(POSITIONS_SHEET)
@@ -294,25 +266,17 @@ def main():
     existing_state = read_state(state_sheet)
     positions = read_positions(positions_sheet)
 
-    rows, total_capital = read_capital_ledger(capital_sheet)
-
-    if total_capital <= 0:
-        total_capital = to_float(
-            config.get("TOTAL_CAPITAL"),
-            500000,
-        )
+    total_capital = read_total_capital(
+        capital_sheet,
+        to_float(config.get("TOTAL_CAPITAL"), 500000),
+    )
 
     liquid_pct = to_float(config.get("LIQUID_BUCKET_PCT"), 18)
-    conservative_pct = to_float(
-        config.get("CONSERVATIVE_BUCKET_PCT"), 22
-    )
+    conservative_pct = to_float(config.get("CONSERVATIVE_BUCKET_PCT"), 22)
     equity_pct = to_float(config.get("EQUITY_BUCKET_PCT"), 60)
 
-    pct_total = liquid_pct + conservative_pct + equity_pct
-    if abs(pct_total - 100.0) > 0.0001:
-        raise ValueError(
-            f"Bucket percentages must total 100%. Current total={pct_total:.4f}%."
-        )
+    if abs(liquid_pct + conservative_pct + equity_pct - 100.0) > 0.0001:
+        raise ValueError("Bucket percentages must total 100%.")
 
     targets = {
         "LIQUID": total_capital * liquid_pct / 100.0,
@@ -320,63 +284,26 @@ def main():
         "EQUITY": total_capital * equity_pct / 100.0,
     }
 
-    actuals, latest_rows = latest_bucket_values(rows)
+    bucket_sheet = ensure_bucket_values_sheet(
+        spreadsheet,
+        existing_state,
+        targets,
+    )
 
-    # One-time migration: establish actual bucket values from the current
-    # PORTFOLIO_STATE. This does not change the current values.
-    if not actuals:
-        actuals = {
-            "LIQUID": to_float(
-                existing_state.get("LIQUID_VALUE"),
-                targets["LIQUID"],
-            ),
-            "CONSERVATIVE": to_float(
-                existing_state.get("CONSERVATIVE_VALUE"),
-                targets["CONSERVATIVE"],
-            ),
-            "EQUITY": to_float(
-                existing_state.get("EQUITY_VALUE"),
-                to_float(
-                    existing_state.get("EQUITY_AVAILABLE"),
-                    targets["EQUITY"],
-                ) + positions_value(positions),
-            ),
-        }
-
-        if not dry_run:
-            append_baseline_rows(capital_sheet, actuals)
-            rows, _ = read_capital_ledger(capital_sheet)
-            actuals, latest_rows = latest_bucket_values(rows)
-
-    # If only some buckets have checkpoints, use their current state values
-    # for the missing buckets.
-    for bucket in BUCKETS:
-        if bucket not in actuals:
-            actuals[bucket] = to_float(
-                existing_state.get(bucket + "_VALUE"),
-                targets[bucket],
-            )
-            latest_rows[bucket] = 0
-
-    actuals = apply_bucket_movements(rows, actuals, latest_rows)
+    actuals = read_bucket_values(
+        bucket_sheet,
+        existing_state,
+        targets,
+    )
 
     pos_value = positions_value(positions)
 
-    # Equity cash is the available equity amount maintained by the Trading
-    # Engine / Mobile Control Center. Equity bucket value is cash + positions.
+    # Equity is always derived from the trading state.
     equity_cash = to_float(
         existing_state.get("EQUITY_AVAILABLE"),
-        max(0.0, actuals["EQUITY"] - pos_value),
+        targets["EQUITY"],
     )
-
-    # If an equity SET_VALUE checkpoint exists, use it as the current bucket
-    # value. Otherwise derive it from the current trading state.
-    if "EQUITY" in latest_rows and latest_rows["EQUITY"] > 0:
-        equity_value = actuals["EQUITY"]
-        equity_cash = max(0.0, equity_value - pos_value)
-    else:
-        equity_value = equity_cash + pos_value
-        actuals["EQUITY"] = equity_value
+    equity_value = equity_cash + pos_value
 
     state = {
         "AS_OF_DATE": datetime.now().strftime("%Y-%m-%d"),
@@ -398,16 +325,17 @@ def main():
     }
 
     print("======================================")
-    print("3-BUCKET ENGINE — ACTUAL VALUES")
+    print("3-BUCKET ENGINE — SIMPLE ACTUAL VALUES")
     print("======================================")
     print(f"TOTAL_CAPITAL: {total_capital:.2f}")
+
     for bucket in BUCKETS:
-        print(f"{bucket}_TARGET: {targets[bucket]:.2f}")
-        print(f"{bucket}_VALUE: {state[bucket + '_VALUE']:.2f}")
-        print(
-            f"{bucket}_DEVIATION: "
-            f"{state[bucket + '_VALUE'] - targets[bucket]:.2f}"
-        )
+        value = state[bucket + "_VALUE"]
+        target = targets[bucket]
+        print(f"{bucket}_TARGET: {target:.2f}")
+        print(f"{bucket}_VALUE: {value:.2f}")
+        print(f"{bucket}_DEVIATION: {value - target:.2f}")
+
     print(f"POSITIONS_VALUE: {pos_value:.2f}")
     print(f"TOTAL_PORTFOLIO_VALUE: {state['TOTAL_PORTFOLIO_VALUE']:.2f}")
     print("======================================")
