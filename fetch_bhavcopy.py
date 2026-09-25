@@ -142,108 +142,84 @@ def download_latest_bhavcopy(
 
     from nselib import capital_market
 
+    print(
+        f"Requesting NSE bhavcopy-with-delivery for "
+        f"{requested_date}."
+    )
+
+    # DAILY mode is deliberately exact-date only.
+    # Historical/backfill has its own date-by-date logic and is unchanged.
+    if requested_date.weekday() >= 5:
+        print(
+            f"{requested_date} is a weekend. "
+            "No daily NSE bhavcopy is expected."
+        )
+        return None
+
+    nse_date = requested_date.strftime("%d-%m-%Y")
+
+    print(
+        f"Trying NSE bhavcopy-with-delivery for "
+        f"{requested_date} ..."
+    )
+
     try:
-        lookback = int(
-            os.environ.get(
-                "MAX_LOOKBACK_DAYS",
-                str(DEFAULT_MAX_LOOKBACK_DAYS),
-            )
+        df = capital_market.bhav_copy_with_delivery(
+            trade_date=nse_date
         )
-    except ValueError:
-        lookback = DEFAULT_MAX_LOOKBACK_DAYS
 
-    if lookback < 0:
-        lookback = DEFAULT_MAX_LOOKBACK_DAYS
+    except FileNotFoundError:
+        print(
+            f"DATA_NOT_AVAILABLE: NSE bhavcopy-with-delivery "
+            f"for {requested_date} is not available yet."
+        )
+        return None
+
+    except Exception as exc:
+
+        message = str(exc).lower()
+
+        retryable = (
+            "404",
+            "not found",
+            "file not found",
+            "no data",
+            "no bhav",
+            "unable to download",
+            "failed to download",
+        )
+
+        if any(term in message for term in retryable):
+            print(
+                f"DATA_NOT_AVAILABLE: No usable NSE bhavcopy "
+                f"for {requested_date}: {exc}"
+            )
+            return None
+
+        raise RuntimeError(
+            f"NSE download failed for {requested_date}: {exc}"
+        ) from exc
+
+    if df is None or df.empty:
+        print(
+            f"DATA_NOT_AVAILABLE: NSE returned no rows for "
+            f"{requested_date}."
+        )
+        return None
 
     print(
-        f"Searching for the latest available NSE "
-        f"bhavcopy-with-delivery on or before {requested_date}."
+        f"SUCCESS: NSE bhavcopy-with-delivery found for "
+        f"{requested_date}."
     )
 
-    for days_back in range(lookback + 1):
+    print(f"NSE returned {len(df)} rows.")
 
-        candidate = requested_date - timedelta(days=days_back)
+    print("NSE columns received:")
+    print(df.columns.tolist())
 
-        # Skip Saturday/Sunday.
-        if candidate.weekday() >= 5:
-            print(f"Skipping {candidate}: weekend.")
-            continue
+    df.attrs["trade_date"] = requested_date
 
-        nse_date = candidate.strftime("%d-%m-%Y")
-
-        print(
-            f"Trying NSE bhavcopy-with-delivery for "
-            f"{candidate} ..."
-        )
-
-        try:
-            df = capital_market.bhav_copy_with_delivery(
-                trade_date=nse_date
-            )
-
-        except FileNotFoundError:
-            print(
-                f"No NSE bhavcopy-with-delivery for {candidate}. "
-                f"Trying previous date."
-            )
-            continue
-
-        except Exception as exc:
-
-            message = str(exc).lower()
-
-            retryable = (
-                "404",
-                "not found",
-                "file not found",
-                "no data",
-                "no bhav",
-                "unable to download",
-                "failed to download",
-            )
-
-            if any(term in message for term in retryable):
-
-                print(
-                    f"No usable NSE copy for {candidate}: {exc}"
-                )
-                print("Trying previous date.")
-                continue
-
-            raise RuntimeError(
-                f"NSE download failed for {candidate}: {exc}"
-            ) from exc
-
-        if df is None or df.empty:
-
-            print(
-                f"NSE returned no rows for {candidate}. "
-                f"Trying previous date."
-            )
-
-            continue
-
-        print(
-            f"SUCCESS: NSE bhavcopy-with-delivery found for "
-            f"{candidate}."
-        )
-
-        print(f"NSE returned {len(df)} rows.")
-
-        print("NSE columns received:")
-        print(df.columns.tolist())
-
-        # Store actual source date without converting it to Timestamp.
-        df.attrs["trade_date"] = candidate
-
-        return df
-
-    print(
-        f"No NSE bhavcopy-with-delivery found in the previous "
-        f"{lookback} calendar days."
-    )
-
-    return None
+    return df
 
 
 # ============================================================================
