@@ -1015,6 +1015,23 @@ def write_date_batch(
     # ------------------------------------------------------------------------
 
     next_row = len(values) + 1
+    required_last_row = next_row + len(rows) - 1
+
+    # Google Sheets does not automatically expand a worksheet grid when
+    # writing beyond its current row limit. Expand it before the batch write.
+    current_row_count = worksheet.row_count
+
+    if required_last_row > current_row_count:
+        rows_to_add = required_last_row - current_row_count
+        print(
+            f"RAW_DATA grid has {current_row_count} rows; "
+            f"{required_last_row} are required. "
+            f"Adding {rows_to_add} rows."
+        )
+        worksheet.resize(rows=required_last_row)
+        print(
+            f"RAW_DATA grid expanded to {worksheet.row_count} rows."
+        )
 
     print(
         f"Trade date {source_date} is new."
