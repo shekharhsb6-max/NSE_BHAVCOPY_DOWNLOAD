@@ -20,6 +20,8 @@ DEFAULT_SPREADSHEET_ID = (
 
 DEFAULT_SHEET_NAME = "RAW_DATA"
 DEFAULT_MAX_LOOKBACK_DAYS = 10
+DEFAULT_DAILY_RETRIES = 7
+DEFAULT_DAILY_RETRY_SECONDS = 300
 DEFAULT_BACKFILL_TRADING_DAYS = 252
 DEFAULT_BACKFILL_MAX_CALENDAR_DAYS = 450
 IST = ZoneInfo("Asia/Kolkata")
@@ -242,6 +244,106 @@ def download_latest_bhavcopy(
         f"{lookback} calendar days."
     )
 
+    return None
+
+
+def download_daily_bhavcopy(
+    requested_date: date,
+) -> pd.DataFrame | None:
+    """Download bhavcopy for exactly today's requested trading date.
+
+    DAILY mode deliberately does NOT fall back to an earlier trading day.
+    It retries the requested date so a temporary NSE publication delay does
+    not silently make the production scanner use yesterday's data.
+    """
+
+    from nselib import capital_market
+
+    try:
+        max_attempts = int(
+            os.environ.get(
+                "DAILY_MAX_ATTEMPTS",
+                str(DEFAULT_DAILY_RETRIES),
+            )
+        )
+    except ValueError:
+        max_attempts = DEFAULT_DAILY_RETRIES
+
+    try:
+        retry_seconds = int(
+            os.environ.get(
+                "DAILY_RETRY_SECONDS",
+                str(DEFAULT_DAILY_RETRY_SECONDS),
+            )
+        )
+    except ValueError:
+        retry_seconds = DEFAULT_DAILY_RETRY_SECONDS
+
+    max_attempts = max(1, max_attempts)
+    retry_seconds = max(0, retry_seconds)
+    nse_date = requested_date.strftime("%d-%m-%Y")
+
+    print(
+        f"DAILY MODE: waiting for NSE bhavcopy-with-delivery for "
+        f"{requested_date}."
+    )
+    print(
+        f"Maximum attempts: {max_attempts}; "
+        f"retry interval: {retry_seconds} seconds."
+    )
+
+    for attempt in range(1, max_attempts + 1):
+        print("")
+        print(
+            f"Attempt {attempt}/{max_attempts}: "
+            f"NSE bhavcopy-with-delivery for {requested_date} ..."
+        )
+
+        try:
+            df = capital_market.bhav_copy_with_delivery(
+                trade_date=nse_date
+            )
+        except FileNotFoundError:
+            df = None
+        except Exception as exc:
+            message = str(exc).lower()
+            retryable = (
+                "404", "not found", "file not found", "no data",
+                "no bhav", "unable to download", "failed to download"
+            )
+            if any(term in message for term in retryable):
+                print(f"NSE file not available yet: {exc}")
+                df = None
+            else:
+                raise RuntimeError(
+                    f"NSE download failed for {requested_date}: {exc}"
+                ) from exc
+
+        if df is not None and not df.empty:
+            print(
+                f"SUCCESS: NSE bhavcopy-with-delivery found for "
+                f"{requested_date} on attempt {attempt}."
+            )
+            print(f"NSE returned {len(df)} rows.")
+            print("NSE columns received:")
+            print(df.columns.tolist())
+            df.attrs["trade_date"] = requested_date
+            return df
+
+        if attempt < max_attempts:
+            print(
+                f"Today's NSE bhavcopy is not available yet. "
+                f"Waiting {retry_seconds} seconds before retrying."
+            )
+            time.sleep(retry_seconds)
+
+    print("")
+    print("DAILY MODE FAILED: today's NSE bhavcopy was not available "
+          f"after {max_attempts} attempts.")
+    print(
+        "The workflow will fail deliberately. Yesterday's data will NOT "
+        "be used as today's production data."
+    )
     return None
 
 
@@ -1727,7 +1829,7 @@ def main() -> int:
     # Download latest available NSE copy.
     # ------------------------------------------------------------------------
 
-    raw_df = download_latest_bhavcopy(
+    raw_df = download_daily_bhavcopy(
         requested_date
     )
 
