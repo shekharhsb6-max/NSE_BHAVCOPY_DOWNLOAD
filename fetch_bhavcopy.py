@@ -1733,6 +1733,18 @@ def main() -> int:
         f"Downloaded date: {actual_trade_date}"
     )
 
+    # LIVE DATE-INTEGRITY GATE:
+    # Never allow a previous trading day's bhavcopy to overwrite RAW_DATA
+    # or ETF_HISTORY when today's date was requested. If NSE has not yet
+    # published the requested date, fail the workflow so downstream
+    # scanner/trading workflows cannot operate on stale market data.
+    if actual_trade_date != requested_date:
+        raise RuntimeError(
+            "DATA_NOT_AVAILABLE: NSE returned "
+            f"{actual_trade_date} when {requested_date} was requested. "
+            "The daily pipeline will not write stale data."
+        )
+
     # ------------------------------------------------------------------------
     # Transform.
     # ------------------------------------------------------------------------
