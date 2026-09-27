@@ -1155,6 +1155,32 @@ def write_date_batch(
     )
 
 
+def sort_raw_data_latest_first(worksheet) -> None:
+    """Keep the newest RAW_DATA trading session immediately below the header."""
+    if worksheet.row_count <= 2:
+        return
+
+    worksheet.spreadsheet.batch_update({
+        "requests": [{
+            "sortRange": {
+                "range": {
+                    "sheetId": worksheet.id,
+                    "startRowIndex": 1,
+                    "endRowIndex": worksheet.row_count,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 15,
+                },
+                "sortSpecs": [{
+                    "dimensionIndex": 0,
+                    "sortOrder": "DESCENDING",
+                }],
+            }
+        }]
+    })
+
+    print("RAW_DATA sorted: TRADE_DATE descending.")
+
+
 # ============================================================================
 # ETF HISTORY
 # ============================================================================
@@ -1905,6 +1931,11 @@ def main() -> int:
         worksheet,
         df,
     )
+
+    # Keep the raw archive easy to inspect: newest trading date first.
+    # This does not alter scanner calculations; ETF_HISTORY remains the
+    # scanner's historical ETF dataset.
+    sort_raw_data_latest_first(worksheet)
 
     # ------------------------------------------------------------------------
     # Update ETF_HISTORY from the same successfully downloaded NSE data.
