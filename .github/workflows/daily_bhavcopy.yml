@@ -2,9 +2,15 @@ name: NSE Daily Bhavcopy
 
 on:
   schedule:
-    # 20:47 IST (15:17 UTC). Use a non-round minute to reduce GitHub
-    # Actions schedule congestion.
+    # Primary: 20:47 IST (15:17 UTC). Use a non-round minute to reduce
+    # GitHub Actions schedule congestion.
     - cron: "47 15 * * 1-5"
+
+    # Backup: 21:47 IST (16:17 UTC).
+    # The DAILY loader is idempotent for an existing trade date, so a
+    # second scheduled attempt is safe if the primary schedule is missed.
+    - cron: "17 16 * * 1-5"
+
   workflow_dispatch:
 
 jobs:
